@@ -526,7 +526,7 @@ static struct snd_pcm_ops pcm_ops = {
 	.trigger = mytek_pcm_trigger,
 	.pointer = mytek_pcm_pointer,
 	.page = snd_pcm_lib_get_vmalloc_page,
-	.mmap = snd_pcm_lib_mmap_vmalloc,
+	.mmap = NULL,
 };
 
 static void mytek_pcm_init_urb(struct pcm_urb *urb,
