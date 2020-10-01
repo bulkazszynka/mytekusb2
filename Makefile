@@ -1,6 +1,9 @@
 obj-m += snd-usb-mytek.o
 snd-usb-mytek-objs += chip.o comm.o control.o firmware.o pcm.o
 
+MY_CFLAGS += -g -DDEBUG
+ccflags-y += ${MY_CFLAGS}
+
 FW_PATH=/lib/firmware
 FW_MYTEK_PATH=$(FW_PATH)/mytek
 
@@ -14,6 +17,11 @@ KERNEL_VERSION=$(shell echo $(VERSION)*65536+$(PATCHLEVEL)*256|bc)
 all:
 	@echo "#define LINUX_VERSION_CODE $(KERNEL_VERSION)" > version.h
 	make CONFIG_DEBUG_SECTION_MISMATCH=y -C /lib/modules/$(KERNEL_BUILD)/build M=$(PWD) modules
+
+debug:
+	@echo "#define LINUX_VERSION_CODE $(KERNEL_VERSION)" > version.h
+	make CONFIG_DEBUG_SECTION_MISMATCH=y -C /lib/modules/$(KERNEL_BUILD)/build M=$(PWD) modules
+	EXTRA_CFLAGS="$(MY_CFLAGS)"
 
 clean:
 	make -C /lib/modules/$(KERNEL_BUILD)/build M=$(PWD) clean
