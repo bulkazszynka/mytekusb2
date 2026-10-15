@@ -1,44 +1,53 @@
 obj-m += snd-usb-mytek.o
-snd-usb-mytek-objs += chip.o comm.o control.o firmware.o pcm.o
+snd-usb-mytek-y := chip.o comm.o control.o firmware.o pcm.o
 
-MY_CFLAGS += -g -DDEBUG
-ccflags-y += ${MY_CFLAGS}
+ifneq ($(KBUILD_EXTMOD),)
+# invoked by kbuild
+ifeq ($(MYTEK_DEBUG),1)
+ccflags-y += -g -DDEBUG
+endif
 
-FW_PATH=/lib/firmware
-FW_MYTEK_PATH=$(FW_PATH)/mytek
+else
+# invoked from the command line or by DKMS
 
 KERNEL_BUILD ?= $(shell uname -r)
+KDIR ?= /lib/modules/$(KERNEL_BUILD)/build
 
-VERSION ?= $(shell uname -r|cut -d. -f1)
-PATCHLEVEL ?= $(shell uname -r|cut -d. -f2)
 
-KERNEL_VERSION=$(shell echo $(VERSION)*65536+$(PATCHLEVEL)*256|bc)
+all: modules
 
-all:
-	@echo "#define LINUX_VERSION_CODE $(KERNEL_VERSION)" > version.h
-	make CONFIG_DEBUG_SECTION_MISMATCH=y -C /lib/modules/$(KERNEL_BUILD)/build M=$(PWD) modules
+modules:
+	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
 
 debug:
-	@echo "#define LINUX_VERSION_CODE $(KERNEL_VERSION)" > version.h
-	make CONFIG_DEBUG_SECTION_MISMATCH=y -C /lib/modules/$(KERNEL_BUILD)/build M=$(PWD) modules
-	EXTRA_CFLAGS="$(MY_CFLAGS)"
+	$(MAKE) -C $(KDIR) M=$(CURDIR) MYTEK_DEBUG=1 modules
 
 clean:
-	make -C /lib/modules/$(KERNEL_BUILD)/build M=$(PWD) clean
-	rm -rf version.h
+	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
+	rm -f version.h
 
+# Plain install for the running kernel only; prefer scripts/dkms-install.sh
+# which rebuilds the module automatically on every kernel update.
 install:
 	rm -f /lib/modules/$(KERNEL_BUILD)/extras/snd-usb-mytek.ko
-	rm -f /lib/modules/$(KERNEL_BUILD)/extra/snd-usb-mytek.ko
 	mkdir -p /lib/modules/$(KERNEL_BUILD)/extra
 	cp snd-usb-mytek.ko /lib/modules/$(KERNEL_BUILD)/extra
-	depmod -a
+	depmod -a $(KERNEL_BUILD)
 
 uninstall:
 	rm -f /lib/modules/$(KERNEL_BUILD)/extra/snd-usb-mytek.ko
+	depmod -a $(KERNEL_BUILD)
 
 kremove:
 	for x in $(shell find /lib/modules/$(KERNEL_BUILD) -iname snd-usb-mytek\*); do \
 	rm -f $$x; \
 	done
 
+dkms-install:
+	./scripts/dkms-install.sh
+
+dkms-uninstall:
+	./scripts/dkms-install.sh --remove
+
+.PHONY: all modules debug clean install uninstall kremove dkms-install dkms-uninstall
+endif

@@ -15,12 +15,6 @@
 #ifndef MYTEK_CHIP_H
 #define MYTEK_CHIP_H
 
-#include "version.h"
-
-#ifndef KERNEL_VERSION
-#define KERNEL_VERSION(a,b,c) (((a) << 16) + ((b) << 8) + (c))
-#endif
-
 #include "common.h"
 
 struct mytek_chip {
@@ -29,7 +23,6 @@ struct mytek_chip {
 	int intf_count; /* number of registered interfaces */
 	int regidx; /* index in module parameter arrays */
 	bool shutdown;
-	bool usbworkaround;
 
 	struct pcm_runtime *pcm;
 	struct control_runtime *control;

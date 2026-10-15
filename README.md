@@ -5,6 +5,54 @@ Since the original [project](https://github.com/lintweaker/mytekusb2) by [lintwe
 has apparently been abandoned, I've decided to fork it and apply two simple patches to make the driver work with current kernels.
 It's been tested on Ubuntu 18.04 with 5.3.0-40-generic.
 
+## Version 2.0 (2026): Linux 6.x / 7.x, DKMS, click fixes
+
+Builds on Linux 6.x and 7.x (tested: 6.8, 6.14, 7.0, 7.3-rc).
+
+### Install with DKMS (rebuilt automatically on kernel updates)
+
+    sudo apt install dkms build-essential linux-headers-$(uname -r)
+    sudo ./scripts/dkms-install.sh            # install / upgrade
+    sudo ./scripts/dkms-install.sh --remove   # uninstall
+
+Firmware is still needed in `/lib/firmware/mytek` (see FIRMWARE).
+
+### Secure Boot
+With Secure Boot enabled the module must be signed with a key enrolled in
+MOK. On Ubuntu, DKMS signs with `/var/lib/shim-signed/mok/MOK.priv`; if that
+key is not enrolled yet, run `sudo update-secureboot-policy --enroll-key`
+and reboot (or point `mok_signing_key`/`mok_certificate` in
+`/etc/dkms/framework.conf` to your own enrolled key).
+
+### What changed against 1.x
+* Playback is queued `out_lead` ms ahead of the bus (default 6). 1.x had
+  ~1 ms of headroom, so any interrupt latency caused gaps (clicks).
+* Feedback packets without data are filled with the nominal frame count for
+  the sample rate (1.x always used 5 frames, wrong above 44.1 kHz).
+* Packet sizes bounded, no permanent stop after one bad USB packet, sample
+  rate changes without closing the device, stereo only (no mono sink),
+  no slot leak across firmware-upload reconnects, no use-after-free on
+  unplug.
+
+### Module parameters (writable at runtime, used at the next stream start)
+* `out_lead` (0-12, default 6): ms of playback queued ahead; 0 = 1.x behaviour
+* `zlp_fill` (default 1): frames for an empty feedback packet:
+  0 = none, 1 = nominal, 2 = 5 (1.x)
+
+e.g. `echo 8 | sudo tee /sys/module/snd_usb_mytek/parameters/out_lead`,
+or permanently in `/etc/modprobe.d/mytek.conf`:
+`options snd-usb-mytek out_lead=8`
+
+### Diagnostics
+`cat /proc/asound/USB2/mytek` shows live streaming counters; each stream
+stop logs a `stream stats:` line (`journalctl -k | grep "stream stats"`).
+`out_pkt_err` > 0 means packets the USB controller could not send in time
+(audible gap); `in_late`/`in_gap_max_us` show host latency.
+
+### Testing without hardware
+`tests/` contains a USB/IP emulation of the DAC and a QEMU harness
+(`tests/run-qemu-test.sh`).
+
 ## Pulse audio stereo sink
 
 Over the years the default settings of PulseAudio has changed and with current defaults Mytek is recognised as a mono sink.

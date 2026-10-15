@@ -6,7 +6,7 @@
  * Based on 6fire usb driver
  *
  * Adapted for Mytek by	: Jurgen Kramer
- * Last updated		: Sep 17, 2015
+ * Last updated		: Oct 15, 2026 (Linux 6.x/7.x port)
  * Copyright		: (C) Jurgen Kramer
  *
  * This program is free software; you can redistribute it and/or modify
@@ -31,13 +31,12 @@
 MODULE_AUTHOR("Jurgen Kramer <gtmkramer@xs4all.nl>");
 MODULE_DESCRIPTION("Mytek Digital Stereo192-DSD DAC USB2 audio driver");
 MODULE_LICENSE("GPL v2");
-MODULE_SUPPORTED_DEVICE("{{Mytek Digital,Stereo192-DSD DAC}}");
+MODULE_VERSION(MYTEK_DRIVER_VERSION);
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX; /* Index 0-max */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR; /* Id for card */
 static bool enable[SNDRV_CARDS] = SNDRV_DEFAULT_ENABLE_PNP; /* Enable card */
 static struct mytek_chip *chips[SNDRV_CARDS] = SNDRV_DEFAULT_PTR;
-static struct usb_device *devices[SNDRV_CARDS] = SNDRV_DEFAULT_PTR;
 
 module_param_array(index, int, NULL, 0444);
 MODULE_PARM_DESC(index, "Index value for the mytek sound device");
@@ -46,37 +45,30 @@ MODULE_PARM_DESC(id, "ID string for the mytek sound device.");
 module_param_array(enable, bool, NULL, 0444);
 MODULE_PARM_DESC(enable, "Enable the mytek sound device.");
 
+/* protects chips[] and covers the whole probe and disconnect paths */
 static DEFINE_MUTEX(register_mutex);
 
 static void mytek_chip_abort(struct mytek_chip *chip)
 {
-	if (chip) {
-		if (chip->pcm)
-			mytek_pcm_abort(chip);
-		if (chip->comm)
-			mytek_comm_abort(chip);
-		if (chip->control)
-			mytek_control_abort(chip);
-		if (chip->card) {
-			snd_card_disconnect(chip->card);
-			snd_card_free_when_closed(chip->card);
-			chip->card = NULL;
-		}
-	}
+	if (chip->pcm)
+		mytek_pcm_abort(chip);
+	if (chip->comm)
+		mytek_comm_abort(chip);
+	if (chip->control)
+		mytek_control_abort(chip);
 }
 
-static void mytek_chip_destroy(struct mytek_chip *chip)
+/* called when the last reference to the card is dropped */
+static void mytek_card_free(struct snd_card *card)
 {
-	if (chip) {
-		if (chip->pcm)
-			mytek_pcm_destroy(chip);
-		if (chip->comm)
-			mytek_comm_destroy(chip);
-		if (chip->control)
-			mytek_control_destroy(chip);
-		if (chip->card)
-			snd_card_free(chip->card);
-	}
+	struct mytek_chip *chip = card->private_data;
+
+	if (chip->pcm)
+		mytek_pcm_destroy(chip);
+	if (chip->control)
+		mytek_control_destroy(chip);
+	if (chip->comm)
+		mytek_comm_destroy(chip);
 }
 
 static int mytek_chip_probe(struct usb_interface *intf,
@@ -89,84 +81,94 @@ static int mytek_chip_probe(struct usb_interface *intf,
 	int regidx = -1; /* index in module parameter array */
 	struct snd_card *card = NULL;
 
-	/* look if we already serve this card and return if so */
 	mutex_lock(&register_mutex);
+
+	/* look if we already serve this card and return if so */
 	for (i = 0; i < SNDRV_CARDS; i++) {
-		if (devices[i] == device) {
-			if (chips[i])
-				chips[i]->intf_count++;
+		if (chips[i] && chips[i]->dev == device) {
+			chips[i]->intf_count++;
 			usb_set_intfdata(intf, chips[i]);
-			mutex_unlock(&register_mutex);
-			return 0;
-		} else if (!devices[i] && regidx < 0)
+			ret = 0;
+			goto unlock;
+		} else if (!chips[i] && regidx < 0)
 			regidx = i;
 	}
 	if (regidx < 0) {
-		mutex_unlock(&register_mutex);
 		dev_err(&intf->dev, "too many cards registered.\n");
-		return -ENODEV;
+		ret = -ENODEV;
+		goto unlock;
 	}
-	devices[regidx] = device;
-	mutex_unlock(&register_mutex);
+	if (!enable[regidx]) {
+		ret = -ENOENT;
+		goto unlock;
+	}
 
 	/* check, if firmware is present on device, upload it if not */
 	ret = mytek_fw_init(intf);
-
 	if (ret < 0)
-		return ret;
-	else if (ret == FW_NOT_READY) /* firmware update performed */
-		return 0;
+		goto unlock;
+	if (ret == FW_NOT_READY) { /* firmware update performed */
+		ret = 0;
+		goto unlock;
+	}
 
 	/* if we are here, card can be registered in alsa. */
 	if (usb_set_interface(device, 0, 0) != 0) {
 		dev_err(&intf->dev, "cannot set first interface.\n");
-		return -EIO;
+		ret = -EIO;
+		goto unlock;
 	}
 	ret = snd_card_new(&intf->dev, index[regidx], id[regidx], THIS_MODULE,
 			sizeof(struct mytek_chip), &card);
 	if (ret < 0) {
 		dev_err(&intf->dev, "cannot create alsa card.\n");
-		return ret;
+		goto unlock;
 	}
-	strcpy(card->driver, "MytekUSB");
-	strcpy(card->shortname, "Mytek Stereo192-DSD USB2");
-	sprintf(card->longname, "%s at %d:%d", card->shortname,
-			device->bus->busnum, device->devnum);
-	snd_card_set_dev(card, &intf->dev);
+	strscpy(card->driver, "MytekUSB", sizeof(card->driver));
+	strscpy(card->shortname, "Mytek Stereo192-DSD USB2",
+		sizeof(card->shortname));
+	snprintf(card->longname, sizeof(card->longname), "%s at %d:%d",
+		 card->shortname, device->bus->busnum, device->devnum);
 
 	chip = card->private_data;
-	chips[regidx] = chip;
 	chip->dev = device;
 	chip->regidx = regidx;
 	chip->intf_count = 1;
 	chip->card = card;
+	card->private_free = mytek_card_free;
 
 	ret = mytek_comm_init(chip);
-	if (ret < 0) {
-		mytek_chip_destroy(chip);
-		return ret;
-	}
+	if (ret < 0)
+		goto destroy_chip;
 
 	ret = mytek_pcm_init(chip);
-	if (ret < 0) {
-		mytek_chip_destroy(chip);
-		return ret;
-	}
+	if (ret < 0)
+		goto destroy_chip;
 
 	ret = mytek_control_init(chip);
-	if (ret < 0) {
-		mytek_chip_destroy(chip);
-		return ret;
-	}
+	if (ret < 0)
+		goto destroy_chip;
 
 	ret = snd_card_register(card);
 	if (ret < 0) {
 		dev_err(&intf->dev, "cannot register card.\n");
-		mytek_chip_destroy(chip);
-		return ret;
+		goto destroy_chip;
 	}
+
 	usb_set_intfdata(intf, chip);
-	return 0;
+	chips[regidx] = chip;
+	dev_info(&intf->dev, "snd-usb-mytek %s ready.\n", MYTEK_DRIVER_VERSION);
+	ret = 0;
+	goto unlock;
+
+destroy_chip:
+	chip->shutdown = true;
+	snd_card_disconnect(card);
+	mytek_chip_abort(chip);
+	snd_card_free(card);
+unlock:
+	mutex_unlock(&register_mutex);
+	return ret;
 }
 
 static void mytek_chip_disconnect(struct usb_interface *intf)
@@ -174,24 +176,32 @@ static void mytek_chip_disconnect(struct usb_interface *intf)
 	struct mytek_chip *chip;
 	struct snd_card *card;
 
+	mutex_lock(&register_mutex);
 	chip = usb_get_intfdata(intf);
-	if (chip) { /* if !chip, fw upload has been performed */
-		card = chip->card;
-		chip->intf_count--;
-		if (!chip->intf_count) {
-			mutex_lock(&register_mutex);
-			devices[chip->regidx] = NULL;
-			chips[chip->regidx] = NULL;
-			mutex_unlock(&register_mutex);
+	/* if !chip, fw upload has been performed */
+	if (!chip)
+		goto unlock;
 
-			chip->shutdown = true;
-			mytek_chip_abort(chip);
-			mytek_chip_destroy(chip);
-		}
-	}
+	chip->intf_count--;
+	if (chip->intf_count)
+		goto unlock;
+
+	chips[chip->regidx] = NULL;
+
+	/*
+	 * snd_card_free_when_closed() may free the card (and the chip
+	 * embedded in it) immediately, so it must be called last.
+	 */
+	card = chip->card;
+	chip->shutdown = true;
+	snd_card_disconnect(card);
+	mytek_chip_abort(chip);
+	snd_card_free_when_closed(card);
+unlock:
+	mutex_unlock(&register_mutex);
 }
 
-static struct usb_device_id device_table[] = {
+static const struct usb_device_id device_table[] = {
 	{
 		.match_flags = USB_DEVICE_ID_MATCH_DEVICE,
 		.idVendor = 0x25ce,
@@ -205,6 +215,8 @@ static struct usb_device_id device_table[] = {
 	{}
 };
 
+MODULE_DEVICE_TABLE(usb, device_table);
+
 static struct usb_driver usb_driver = {
 	.name = "snd-usb-mytek",
 	.probe = mytek_chip_probe,
@@ -212,24 +224,4 @@ static struct usb_driver usb_driver = {
 	.id_table = device_table,
 };
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 3, 0)
-static int mytek_chip_init(void) {
-
-	return usb_register(&usb_driver);
-}
-
-static void mytek_chip_exit(void) {
-
-	usb_deregister(&usb_driver);
-}
-#endif
-
-MODULE_DEVICE_TABLE(usb, device_table);
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 3, 0)
-#pragma message ("Build for kernel older then version 3.3")
-module_init(mytek_chip_init);
-module_exit(mytek_chip_exit);
-#else
 module_usb_driver(usb_driver);
-#endif

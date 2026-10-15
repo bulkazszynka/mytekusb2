@@ -16,6 +16,7 @@
  */
 
 #include <linux/interrupt.h>
+#include <linux/delay.h>
 #include <sound/control.h>
 #include <sound/tlv.h>
 

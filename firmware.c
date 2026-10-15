@@ -19,6 +19,11 @@
 #include <linux/module.h>
 #include <linux/bitrev.h>
 #include <linux/kernel.h>
+#include <linux/slab.h>
+#include <linux/string.h>
+#if defined(__has_include) && __has_include(<linux/hex.h>)
+#include <linux/hex.h>
+#endif
 
 #include "firmware.h"
 #include "chip.h"
@@ -167,11 +172,17 @@ static int mytek_fw_ezusb_write(struct usb_device *device,
 		int type, int value, char *data, int len)
 {
 	int ret;
-	char *buffer = kmalloc(len, GFP_DMA);
-	buffer = memcpy(buffer, data, len);
+	char *buffer = NULL;
+
+	/* usb transfer buffers must be DMA-able, never on the stack */
+	if (len) {
+		buffer = kmemdup(data, len, GFP_KERNEL);
+		if (!buffer)
+			return -ENOMEM;
+	}
 	ret = usb_control_msg(device, usb_sndctrlpipe(device, 0), type,
 			USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-			value, 0, buffer, len, HZ);
+			value, 0, buffer, len, 1000);
 	kfree(buffer);
 	if (ret < 0)
 		return ret;
@@ -185,7 +196,7 @@ static int mytek_fw_ezusb_read(struct usb_device *device,
 {
 	int ret = usb_control_msg(device, usb_rcvctrlpipe(device, 0), type,
 			USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE, value,
-			0, data, len, HZ);
+			0, data, len, 1000);
 	if (ret < 0)
 		return ret;
 	else if (ret != len)
@@ -200,7 +211,7 @@ static int mytek_fw_fpga_write(struct usb_device *device,
 	int ret;
 
 	ret = usb_bulk_msg(device, usb_sndbulkpipe(device, FPGA_EP), data, len,
-			&actual_len, HZ);
+			&actual_len, 1000);
 	if (ret < 0)
 		return ret;
 	else if (actual_len != len)
@@ -316,11 +327,7 @@ static int mytek_fw_fpga_upload(
 
 	while (c != end) {
 		for (i = 0; c != end && i < FPGA_BUFSIZE; i++, c++)
-#ifdef CONFIG_HAVE_ARCH_BITREVERSE
 			buffer[i] = bitrev8((u8) *c);
-#else
-			buffer[i] = byte_rev_table[(u8) *c];
-#endif
 		ret = mytek_fw_fpga_write(device, buffer, i);
 		if (ret < 0) {
 			release_firmware(fw);

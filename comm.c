@@ -26,7 +26,6 @@ enum {
 static void mytek_comm_init_urb(struct comm_runtime *rt, struct urb *urb,
 		u8 *buffer, void *context, void(*handler)(struct urb *urb))
 {
-	usb_init_urb(urb);
 	urb->transfer_buffer = buffer;
 	urb->pipe = usb_sndintpipe(rt->chip->dev, COMM_EP);
 	urb->complete = handler;
@@ -38,6 +37,15 @@ static void mytek_comm_init_urb(struct comm_runtime *rt, struct urb *urb,
 static void mytek_comm_receiver_handler(struct urb *urb)
 {
 	struct comm_runtime *rt = urb->context;
+
+	switch (urb->status) {
+	case -ENOENT:		/* killed */
+	case -ECONNRESET:	/* unlinked */
+	case -ESHUTDOWN:	/* device gone */
+	case -ENODEV:
+	case -EPERM:		/* poisoned */
+		return;
+	}
 
 	if (!rt->chip->shutdown) {
 		urb->status = 0;
@@ -91,7 +99,7 @@ static int mytek_comm_send_buffer(u8 *buffer, struct usb_device *dev)
 	int actual_len;
 
 	ret = usb_interrupt_msg(dev, usb_sndintpipe(dev, COMM_EP),
-			buffer, buffer[1] + 2, &actual_len, HZ);
+			buffer, buffer[1] + 2, &actual_len, 1000);
 	if (ret < 0)
 		return ret;
 	else if (actual_len != buffer[1] + 2)
@@ -164,10 +172,15 @@ int mytek_comm_init(struct mytek_chip *chip)
 		return -ENOMEM;
 	}
 
-	urb = &rt->receiver;
+	urb = usb_alloc_urb(0, GFP_KERNEL);
+	if (!urb) {
+		kfree(rt->receiver_buffer);
+		kfree(rt);
+		return -ENOMEM;
+	}
+	rt->receiver = urb;
 	rt->serial = 1;
 	rt->chip = chip;
-	usb_init_urb(urb);
 	rt->init_urb = mytek_comm_init_urb;
 	rt->write8 = mytek_comm_write8;
 	rt->write16 = mytek_comm_write16;
@@ -188,6 +201,7 @@ int mytek_comm_init(struct mytek_chip *chip)
 	urb->interval = 1;
 	ret = usb_submit_urb(urb, GFP_KERNEL);
 	if (ret < 0) {
+		usb_free_urb(urb);
 		kfree(rt->receiver_buffer);
 		kfree(rt);
 		dev_err(&chip->dev->dev, "cannot create comm data receiver.\n");
@@ -202,13 +216,17 @@ void mytek_comm_abort(struct mytek_chip *chip)
 	struct comm_runtime *rt = chip->comm;
 
 	if (rt)
-		usb_poison_urb(&rt->receiver);
+		usb_poison_urb(rt->receiver);
 }
 
 void mytek_comm_destroy(struct mytek_chip *chip)
 {
 	struct comm_runtime *rt = chip->comm;
 
+	if (!rt)
+		return;
+	/* the urb has been poisoned in mytek_comm_abort() */
+	usb_free_urb(rt->receiver);
 	kfree(rt->receiver_buffer);
 	kfree(rt);
 	chip->comm = NULL;
