@@ -49,6 +49,44 @@ stop logs a `stream stats:` line (`journalctl -k | grep "stream stats"`).
 `out_pkt_err` > 0 means packets the USB controller could not send in time
 (audible gap); `in_late`/`in_gap_max_us` show host latency.
 
+### If clicks return
+
+1. Note the time of the click, then look at what the driver measured (one
+   line per playback session, the newest last):
+
+       journalctl -k --since today | grep -E "stream stats|out packets|in packet|starved"
+       cat /proc/asound/USB2/mytek      # live counters of the running stream
+
+2. Read the line:
+   * `out_pkt_err` > 0 or "out packets not sent": the USB controller ran out
+     of queued audio -> audible gap. Compare `gap_max` with `lead` (ms).
+     If `gap_max` gets close to `lead` (e.g. 5000us with lead=6), give the
+     driver more headroom (adds that many ms of latency, harmless for music):
+
+         echo "options snd-usb-mytek out_lead=10" | sudo tee /etc/modprobe.d/mytek.conf
+
+     It takes effect on the next stream (or now:
+     `echo 10 | sudo tee /sys/module/snd_usb_mytek/parameters/out_lead`).
+     Maximum is 12. Large `gap_max` also suggests a system problem
+     (power saving, a misbehaving driver); try `performance` CPU governor
+     to confirm.
+   * `empty`, `pkt_err`, `clamped` > 0: the DAC sent unusual feedback.
+     Note the values; `zlp_fill=0/1/2` changes how empty packets are handled.
+   * All counters 0 but you heard a click: the driver delivered every
+     sample; check PipeWire with `pw-top` (ERR column = PipeWire underruns,
+     fix by raising the quantum, e.g. `pw-metadata -n settings 0
+     clock.force-quantum 2048`).
+   * The click comes exactly when playback starts or the sample rate
+     changes (a new "rate ..." line): that is the DAC re-locking its
+     clock, expected. To avoid most of them, stop PipeWire from suspending
+     the DAC and switching rates (WirePlumber `session.suspend-timeout-seconds = 0`,
+     fixed `default.clock.rate`).
+
+3. If the driver is missing after a kernel update: `dkms status` should list
+   `snd-usb-mytek` for the new kernel; if not, install the headers
+   (`sudo apt install linux-headers-$(uname -r)`) and run
+   `sudo ./scripts/dkms-install.sh` again.
+
 ### Testing without hardware
 `tests/` contains a USB/IP emulation of the DAC and a QEMU harness
 (`tests/run-qemu-test.sh`).
