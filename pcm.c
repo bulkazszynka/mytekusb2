@@ -160,7 +160,7 @@ static void mytek_pcm_setup_endpoints(struct pcm_runtime *rt)
 	rt->packets_per_sec = (dev->speed >= USB_SPEED_HIGH ? 8000 : 1000)
 			/ rt->urb_interval;
 
-	dev_info(&dev->dev,
+	dev_dbg(&dev->dev,
 		 "rate %d: alt %d, IN maxp %d (table %d), OUT maxp %d (table %d), %u packets/s\n",
 		 rates[rt->rate], alts ? alts->desc.bAlternateSetting : -1,
 		 in_maxp, rates_in_packet_size[rt->rate],
@@ -233,10 +233,29 @@ static void mytek_pcm_reset_stats(struct pcm_runtime *rt)
 	rt->stats.started = ktime_get();
 }
 
+/*
+ * One summary line per stream: in the normal log only if something went
+ * wrong or the host came close to the out_lead headroom, else debug only.
+ */
 static void mytek_pcm_log_stats(struct pcm_runtime *rt)
 {
 	struct pcm_stats *st = &rt->stats;
+	u32 warn_gap_us = max_t(u32, rt->out_lead * 500, 1500);
+	bool notable = st->in_empty || st->in_pkt_err || st->in_urb_err ||
+		st->in_submit_err ||
+		st->in_clamped || st->out_pkt_err || st->out_urb_err ||
+		st->out_submit_err || st->out_starved ||
+		st->in_gap_max_us > warn_gap_us;
 
+	if (!st->in_urbs)
+		return;
+	if (!notable) {
+		dev_dbg(&rt->chip->dev->dev,
+			"stream stats: %llds @%d, no problems, gap_max=%uus\n",
+			ktime_ms_delta(ktime_get(), st->started) / 1000,
+			rates[rt->rate], st->in_gap_max_us);
+		return;
+	}
 	dev_info(&rt->chip->dev->dev,
 		 "stream stats: %llds @%d lead=%u zlp_fill=%u | in: urbs=%llu empty=%llu pkt_err=%llu urb_err=%llu submit_err=%llu clamped=%llu late=%llu gap_max=%uus frames=%u..%u | out: urbs=%llu pkt_err=%llu urb_err=%llu submit_err=%llu starved=%llu\n",
 		 ktime_ms_delta(ktime_get(), st->started) / 1000,

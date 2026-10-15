@@ -121,7 +121,7 @@ static int mytek_comm_write8(struct comm_runtime *rt, u8 request,
 
 	mytek_comm_init_buffer(buffer, rt->cmdid, request, reg, value, 0x00);
 
-	if (rt->cmdid == 255) 
+	if (rt->cmdid == 255)
 		rt->cmdid = 0;
 	else
 		rt->cmdid = rt->cmdid+1;
@@ -145,7 +145,7 @@ static int mytek_comm_write16(struct comm_runtime *rt, u8 request,
 
 	mytek_comm_init_buffer(buffer, rt->cmdid, request, reg, vl, vh);
 
-	if (rt->cmdid == 255) 
+	if (rt->cmdid == 255)
 		rt->cmdid = 0;
 	else
 		rt->cmdid = rt->cmdid+1;

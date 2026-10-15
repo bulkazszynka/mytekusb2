@@ -1,9 +1,15 @@
 # mytekusb2
 
-Linux ALSA USB driver for the Mytek Digital Stereo192-DSD DAC that WORKS with newer kernels.
-Since the original [project](https://github.com/lintweaker/mytekusb2) by [lintweaker](https://github.com/lintweaker)
-has apparently been abandoned, I've decided to fork it and apply two simple patches to make the driver work with current kernels.
-It's been tested on Ubuntu 18.04 with 5.3.0-40-generic.
+Linux ALSA USB driver for the Mytek Digital Stereo192-DSD DAC (USB2 input).
+Forked from [lintweaker/mytekusb2](https://github.com/lintweaker/mytekusb2)
+by Jurgen Kramer, which is based on the in-kernel TerraTec DMX 6Fire USB
+driver by Torsten Schenk.
+
+Features: automatic firmware loading (three files in `/lib/firmware/mytek`,
+see FIRMWARE), playback at 24/32 bit, 44.1-192 kHz, stereo; DSD works as DoP
+(DSD over PCM). The DAC has no USB-controllable volume. Remember to switch the
+Mytek to its USB2 input. `aplay -l` should list
+`card N: USB2 [Mytek Stereo192-DSD USB2], device 0: MytekUSB2 [Mytek USB2]`.
 
 ## Version 2.0 (2026): Linux 6.x / 7.x, DKMS, click fixes
 
@@ -44,15 +50,20 @@ or permanently in `/etc/modprobe.d/mytek.conf`:
 `options snd-usb-mytek out_lead=8`
 
 ### Diagnostics
-`cat /proc/asound/USB2/mytek` shows live streaming counters; each stream
-stop logs a `stream stats:` line (`journalctl -k | grep "stream stats"`).
+`cat /proc/asound/USB2/mytek` shows live streaming counters. When a stream
+stops, a `stream stats:` line is written to the kernel log only if something
+went wrong or the host came close to the `out_lead` headroom
+(`journalctl -k | grep "stream stats"`). For the per-stream details of every
+stream (rate/packet sizes, summaries) enable debug messages:
+`echo 'module snd_usb_mytek +p' | sudo tee /sys/kernel/debug/dynamic_debug/control`.
 `out_pkt_err` > 0 means packets the USB controller could not send in time
 (audible gap); `in_late`/`in_gap_max_us` show host latency.
 
 ### If clicks return
 
-1. Note the time of the click, then look at what the driver measured (one
-   line per playback session, the newest last):
+1. Note the time of the click, then look at what the driver measured (a
+   line is logged for every stream that had problems or a close call, the
+   newest last; no line = the driver saw nothing wrong):
 
        journalctl -k --since today | grep -E "stream stats|out packets|in packet|starved"
        cat /proc/asound/USB2/mytek      # live counters of the running stream
@@ -77,7 +88,7 @@ stop logs a `stream stats:` line (`journalctl -k | grep "stream stats"`).
      fix by raising the quantum, e.g. `pw-metadata -n settings 0
      clock.force-quantum 2048`).
    * The click comes exactly when playback starts or the sample rate
-     changes (a new "rate ..." line): that is the DAC re-locking its
+     changes: that is the DAC re-locking its
      clock, expected. To avoid most of them, stop PipeWire from suspending
      the DAC and switching rates (WirePlumber `session.suspend-timeout-seconds = 0`,
      fixed `default.clock.rate`).
@@ -90,55 +101,3 @@ stop logs a `stream stats:` line (`journalctl -k | grep "stream stats"`).
 ### Testing without hardware
 `tests/` contains a USB/IP emulation of the DAC and a QEMU harness
 (`tests/run-qemu-test.sh`).
-
-## Pulse audio stereo sink
-
-Over the years the default settings of PulseAudio has changed and with current defaults Mytek is recognised as a mono sink.
-To solve this issue you can:
-
-- create an udev rule and Mytek specific PulseAudio profile (the hard, yet the proper way),
-
-- edit the default PulseAudio configuration file and comment out the analog mono mapping, then Mytek will register with stereo-fallback profile (easy way, but be careful since no mono device will work properly with such profile).
-
-Enjoy the music!
-Mikołaj Molenda
-
->Linux ALSA USB driver for the Mytek Digital Stereo192-DSD DAC
->
->This is the Linux ALSA driver for the Mytek Digital Stereo192-DSD DAC using its
->USB2 interface. It is based on the TerraTec DMX 6Fire USB driver by Torsten Schenk.
->The driver has been tailored to work with the Mytek. All features of the original 
->driver not usable for the Mytek have been removed.
->
->Current features:
->- automatic firmware loading (see FIRMWARE and ISSUES)
->- playback at 24 and 32-bit, samplerates from 44.1k to 192.0k
->- This driver is tested with the Mytek DAC running firmware 1.7.1 and 1.7.5.5
->- Do not forget to switch the Mytek to 'USB2' input!
->
->Notes:
->- DoP (DSD over PCM) works using MPD 0.17 or newer and the latest squeezelite
->  versions
->- No mixer support as Mytek has no mixer controlable via USB
->
->Tested on:
->- Various x86 and x86_64 systems running recent versions of Fedora (>= 17)
->  including Fedora based Vortexbox 2.2
->- Tested on a ARM based Cubox running Fedora 17 hardfp
->- Tested on ARM with Wandboard Dual and Wandboard Quad running Community SqueezeOS
->
->Verify:
->- To verify that the driver is loaded and running properly you can check with
->  ALSA tool 'aplay'.
->
->Output for 'aplay -l' [Mytek is the second audio interface in this example]:
->
->card 1: USB2 [Mytek Stereo192-DSD USB2], device 0: MytekUSB2 [Mytek USB2]
->  Subdevices: 1/1
->  Subdevice #0: subdevice #0
->
->The driver needs three pieces of firmware to operate, see FIRMWARE for details.
->See ISSUES for current issues and INSTALL for installation guidelines.
->
->Enjoy!
->Jurgen Kramer
