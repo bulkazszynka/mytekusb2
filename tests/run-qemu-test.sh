@@ -29,6 +29,6 @@ rm -rf $W/mod; cp -r $SRC $W/mod; rm -rf $W/mod/.git $W/mod/cert
 make -C $W/mod KDIR=$KB modules >/dev/null
 cp $W/mod/snd-usb-mytek.ko $R/
 (cd $R && find . | cpio -o -H newc 2>/dev/null | gzip -1) > $W/initramfs.gz
-timeout 900 qemu-system-x86_64 -accel tcg,thread=multi -m 2048 -smp 4 -nographic -no-reboot \
+timeout 1500 qemu-system-x86_64 -accel tcg,thread=multi -m 2048 -smp 2 -nographic -no-reboot \
 	-kernel $KB/arch/x86/boot/bzImage -initrd $W/initramfs.gz \
 	-append "console=ttyS0 panic=-1 quiet" | tee $W/qemu.log

@@ -8,8 +8,9 @@
  * (iso IN) packets at the nominal rate of the selected sample rate and
  * consumes iso OUT urbs at the same pace, verifying the playback data:
  * the test signal is a ramp, left = n, right = ~n (24 bit), n = 1, 2, ...
- * DoP streams (detected by the first frame after SET_INTERFACE: DSD
- * silence 0x69 with a DoP marker) are checked as DoP: markers 0x05/0xfa
+ * DoP streams (detected by the first non-zero frame after SET_INTERFACE:
+ * the same DoP marker in both channels; zeros before it are the
+ * dop_preroll=0 pre-roll) are checked as DoP: markers 0x05/0xfa
  * alternating every frame in both channels, the 16 DSD bits per channel
  * (earlier byte in the middle byte) a ramp left = n, right = ~n (16 bit);
  * 0x6969 = silence.
@@ -105,7 +106,8 @@ static long in_pkt_count, out_urb_count;
 /* verification */
 static unsigned long long frames_rx, silence_rx, disc, bad_hdr, bad_marker,
 	in_urbs_tx, out_urbs_rx, underruns, zlp_injected, err_injected,
-	exdev_injected, pkt_frames_hist[64], dop_frames_rx, dop_exit_rx;
+	exdev_injected, pkt_frames_hist[64], dop_frames_rx, dop_exit_rx,
+	preroll_zero_rx;
 static uint32_t last_l;
 static int have_last;
 static int out_started;
@@ -413,8 +415,16 @@ static void verify_out(struct pending *p)
 			for (ch = 0; ch < slots; ch++)
 				if (fr[ch * 4 + 3] != 0x40)
 					bad_marker++;
+			/* dop_preroll=0: PCM zeros before the first DoP frame */
+			if (dop_stream < 0 && !(fr[0] | fr[1] | fr[2] |
+						fr[4] | fr[5] | fr[6])) {
+				frames_rx++;
+				silence_rx++;
+				preroll_zero_rx++;
+				continue;
+			}
 			if (dop_stream < 0)
-				dop_stream = fr[0] == 0x69 &&
+				dop_stream = fr[2] == fr[6] &&
 					     (fr[2] == 0x05 || fr[2] == 0xfa);
 			if (dop_stream) {
 				verify_dop_frame(fr);
@@ -477,9 +487,10 @@ static void dump_stats(const char *why)
 	else
 		printf(" | vendor_seq=MISMATCH\n");
 
-	printf("EMU-MODE: alt=%d clk=0x%02x%02x en_i2s=0x%04x en_dsd=0x%04x reg6=0x%04x dop=%d dop_frames=%llu dop_exit_frames=%llu\n",
+	printf("EMU-MODE: alt=%d clk=0x%02x%02x en_i2s=0x%04x en_dsd=0x%04x reg6=0x%04x dop=%d dop_frames=%llu dop_exit_frames=%llu preroll_zero_frames=%llu\n",
 	       stream_alt, rate_reg_vl & 0xff, rate_reg_vh & 0xff, en_i2s,
-	       en_dsd, reg6, dop_stream, dop_frames_rx, dop_exit_rx);
+	       en_dsd, reg6, dop_stream, dop_frames_rx, dop_exit_rx,
+	       preroll_zero_rx);
 	printf("EMU-STATS(%s): rate=%d in_urbs=%llu out_urbs=%llu frames=%llu silence=%llu signal=%llu discontinuities=%llu bad_hdr=%llu bad_marker=%llu underruns=%llu zlp_inj=%llu err_inj=%llu exdev_inj=%llu last_sample=%u\n",
 	       why, cur_rate(), in_urbs_tx, out_urbs_rx, frames_rx, silence_rx,
 	       frames_rx - silence_rx, disc, bad_hdr, bad_marker, underruns,
@@ -492,6 +503,7 @@ static void dump_stats(const char *why)
 	fflush(stdout);
 	frames_rx = silence_rx = disc = bad_hdr = bad_marker = 0;
 	in_urbs_tx = out_urbs_rx = underruns = dop_frames_rx = dop_exit_rx = 0;
+	preroll_zero_rx = 0;
 	zlp_injected = err_injected = exdev_injected = 0;
 	memset(pkt_frames_hist, 0, sizeof(pkt_frames_hist));
 	have_last = 0;

@@ -69,6 +69,9 @@ DSD256 is not supported by the DAC.
 * `mute_delay` (0-1000, default 20): ms the DAC is muted before a stream
   stops; `dop_exit` (0-1000, default 0): ms of PCM silence (still muted)
   after a DSD stream before it stops
+* `dop_preroll` (default 1): what a DSD stream sends before the music:
+  1 = DoP silence, 0 = PCM zeros (the DAC switches to DSD only when the
+  music starts, as with the Windows driver)
 * `unmute` (default 1): diagnostic, 0 keeps the DAC muted
 * `legacy_ports` (default 0): up to 192k use the I2S port setup of driver
   <= 2.2.0 (ports 0-2, ports 1/2 as DSD ports) instead of the Windows

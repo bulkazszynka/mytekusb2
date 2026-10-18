@@ -78,6 +78,16 @@ module_param(dop_exit, uint, 0644);
 MODULE_PARM_DESC(dop_exit,
 	"Milliseconds of PCM silence after a DSD stream before it stops (default 0, max 1000).");
 
+/*
+ * Idle frames of a DSD stream before the first playback data: DoP
+ * silence, or PCM zeros as the Windows driver sends them (it starts DoP
+ * with the music, so the DAC switches to DSD only then).
+ */
+static bool dop_preroll = true;
+module_param(dop_preroll, bool, 0644);
+MODULE_PARM_DESC(dop_preroll,
+	"DSD stream start: 1 = DoP silence before the music (default), 0 = PCM zeros like the Windows driver.");
+
 /* diagnostic: 0 keeps the DAC muted (GPIO 0 low) while streaming */
 static bool unmute = true;
 module_param(unmute, bool, 0644);
@@ -616,6 +626,8 @@ static struct snd_pcm_substream *mytek_pcm_fill_out_urb(
 	unsigned int total_length = 0;
 	unsigned int frame;
 	unsigned int channel;
+	bool active;
+	bool dop;
 	int i;
 	u8 *dest;
 
@@ -630,10 +642,17 @@ static struct snd_pcm_substream *mytek_pcm_fill_out_urb(
 	}
 	memset(out_urb->buffer, 0, total_length);
 
+	spin_lock_irqsave(&sub->lock, flags);
+	active = sub->active && sub->instance;
+	if (active)
+		rt->dop_idle = true;
+	dop = rt->dop && rt->dop_idle;
+
 	/*
 	 * packet header and the 4th byte of each sample (0x40 for analog);
 	 * in DoP mode also the marker and DSD silence for the stereo pair,
-	 * so the DAC stays in DSD mode while no data is played
+	 * so the DAC stays in DSD mode while no data is played (PCM zeros
+	 * before the first data with dop_preroll=0)
 	 */
 	dest = out_urb->buffer;
 	for (i = 0; i < PCM_N_PACKETS_PER_URB; i++) {
@@ -642,7 +661,7 @@ static struct snd_pcm_substream *mytek_pcm_fill_out_urb(
 		*(dest++) = frames[i];
 		*(dest++) = 0x00;
 		for (frame = 0; frame < frames[i]; frame++) {
-			if (rt->dop) {
+			if (dop) {
 				for (channel = 0; channel < 2; channel++) {
 					dest[(channel << 2) + 0] = DSD_SILENCE;
 					dest[(channel << 2) + 1] = DSD_SILENCE;
@@ -659,8 +678,7 @@ static struct snd_pcm_substream *mytek_pcm_fill_out_urb(
 		}
 	}
 
-	spin_lock_irqsave(&sub->lock, flags);
-	if (sub->active && sub->instance) {
+	if (active) {
 		mytek_pcm_playback(sub, out_urb);
 		if (sub->period_off >= sub->instance->runtime->period_size) {
 			sub->period_off %= sub->instance->runtime->period_size;
@@ -691,6 +709,7 @@ static int mytek_pcm_stream_start(struct pcm_runtime *rt)
 	rt->out_next = 0;
 	rt->nominal_acc = 0;
 	rt->dop_marker = 0;
+	rt->dop_idle = READ_ONCE(dop_preroll);
 	rt->zlp_fill = READ_ONCE(zlp_fill);
 	rt->out_lead = min_t(unsigned int, READ_ONCE(out_lead), OUT_LEAD_MAX);
 	rt->stream_wait_cond = false;
@@ -1113,6 +1132,7 @@ static void mytek_pcm_proc_read(struct snd_info_entry *entry,
 	snd_iprintf(buffer, "unmute_delay: %u\n", READ_ONCE(unmute_delay));
 	snd_iprintf(buffer, "mute_delay: %u\n", READ_ONCE(mute_delay));
 	snd_iprintf(buffer, "dop_exit: %u\n", READ_ONCE(dop_exit));
+	snd_iprintf(buffer, "dop_preroll: %d\n", READ_ONCE(dop_preroll));
 	snd_iprintf(buffer, "out_lead: %u\n", rt->out_lead);
 	snd_iprintf(buffer, "zlp_fill: %u\n", rt->zlp_fill);
 	snd_iprintf(buffer, "in_packet_size: %d\n", rt->in_packet_size);

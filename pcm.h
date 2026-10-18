@@ -107,6 +107,7 @@ struct pcm_runtime {
 	u8 rate; /* one of PCM_RATE_XXX */
 	bool dop; /* DSD stream: device frames are DoP, idle = DSD silence */
 	bool dop_marker; /* next DoP marker: 0 = 0x05, 1 = 0xfa */
+	bool dop_idle; /* DoP stream: idle frames are DSD silence, not zeros */
 	wait_queue_head_t stream_wait_queue;
 	bool stream_wait_cond;
 
