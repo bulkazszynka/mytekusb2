@@ -21,7 +21,7 @@
 #include <sound/core.h>
 
 #define PREFIX "mytek: "
-#define MYTEK_DRIVER_VERSION "2.2.0"
+#define MYTEK_DRIVER_VERSION "2.2.1"
 
 struct mytek_chip;
 struct pcm_runtime;

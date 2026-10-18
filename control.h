@@ -41,6 +41,7 @@ struct control_runtime {
 	struct mytek_chip *chip;
 
 	bool usb_streaming;
+	u16 en_i2s; /* I2S ports of the current rate: out mask << 8 | in mask */
 
 };
 

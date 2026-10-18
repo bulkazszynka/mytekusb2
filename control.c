@@ -17,6 +17,8 @@
 
 #include <linux/interrupt.h>
 #include <linux/delay.h>
+#include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <sound/control.h>
 #include <sound/tlv.h>
 
@@ -57,28 +59,35 @@ init_data_mytek[] = {
 };
 
 /*
+ * I2S port setup. The Windows driver uses port 0 alone for every rate
+ * (USB capture, 2026-10-18): EN_I2S 0x0101 (out port 0, in port 0),
+ * EN_DSD 0. Driver <= 2.2.0 used the setup snooped from WinXP in 2013 up
+ * to 192k: out ports 0-2, in ports 0-1, ports 1/2 marked as DSD ports -
+ * with it the DAC kept showing "DSD" after a DSD stream.
+ */
+static bool legacy_ports;
+module_param(legacy_ports, bool, 0644);
+MODULE_PARM_DESC(legacy_ports,
+	"Up to 192k use the I2S port setup of driver <= 2.2.0 (EN_I2S 0x0703, EN_DSD 6) instead of the Windows driver's (default off).");
+
+/*
  * Per-rate device setup. CLK_SEL (FPGA reg 1) codes and alt settings are
- * those of the vendor driver's rate table. Up to 192k the I2S port setup is
- * the one this driver always used (out ports 0-2, in ports 0-1). 352.8k
- * only fits into a packet with port 0 alone, which is what the Windows
- * driver uses for every rate (USB capture, 2026-10-18): EN_I2S 0x0101,
- * EN_DSD 0. The DAC takes 352.8k only as the DoP carrier for DSD128 (its
- * PCM limit is 192k); the vendor's 384k entry (0x0107) is left out.
- * Keep synced with CONTROL_RATE_XXX in control.h and the tables in pcm.c.
+ * those of the vendor driver's rate table. The DAC takes 352.8k only as the
+ * DoP carrier for DSD128 (its PCM limit is 192k); the vendor's 384k entry
+ * (0x0107) is left out. Keep synced with CONTROL_RATE_XXX in control.h and
+ * the tables in pcm.c.
  */
 static const struct {
 	u8 alt;
 	u16 clk_sel;	/* reg 1 */
-	u16 en_i2s;	/* reg 2: out port mask << 8 | in port mask */
-	u16 en_dsd;	/* reg 4 */
 } rate_setup[CONTROL_N_RATES] = {
-	{ 1, 0x0011, 0x0703, 0x0006 },	/* 44.1k */
-	{ 1, 0x0111, 0x0703, 0x0006 },	/* 48k */
-	{ 2, 0x0010, 0x0703, 0x0006 },	/* 88.2k */
-	{ 2, 0x0110, 0x0703, 0x0006 },	/* 96k */
-	{ 3, 0x0000, 0x0703, 0x0006 },	/* 176.4k */
-	{ 3, 0x0100, 0x0703, 0x0006 },	/* 192k */
-	{ 4, 0x0007, 0x0101, 0x0000 },	/* 352.8k, DoP DSD128 */
+	{ 1, 0x0011 },	/* 44.1k */
+	{ 1, 0x0111 },	/* 48k */
+	{ 2, 0x0010 },	/* 88.2k */
+	{ 2, 0x0110 },	/* 96k */
+	{ 3, 0x0000 },	/* 176.4k */
+	{ 3, 0x0100 },	/* 192k */
+	{ 4, 0x0007 },	/* 352.8k, DoP DSD128 */
 };
 
 /* write16() takes the high byte first */
@@ -93,9 +102,17 @@ static int mytek_control_set_rate(struct control_runtime *rt, int rate)
 	int ret;
 	struct usb_device *device = rt->chip->dev;
 	struct comm_runtime *comm_rt = rt->chip->comm;
+	u16 en_dsd = 0;
 
 	if (rate < 0 || rate >= CONTROL_N_RATES)
 		return -EINVAL;
+
+	/* the legacy setup does not fit into a 352.8k packet */
+	rt->en_i2s = 0x0101;
+	if (READ_ONCE(legacy_ports) && rate <= CONTROL_RATE_192KHZ) {
+		rt->en_i2s = 0x0703;
+		en_dsd = 0x0006;
+	}
 
 	ret = usb_set_interface(device, 1, rate_setup[rate].alt);
 	if (ret < 0) {
@@ -117,8 +134,8 @@ static int mytek_control_set_rate(struct control_runtime *rt, int rate)
 
 	comm_rt->write16(comm_rt, 0x02, 0x00, 0x00, 0x00);	/* Disable streaming */
 	comm_rt->write16(comm_rt, 0x02, 0x05, 0x00, 0x00);	/* Set out sample delay to 0 */
-	mytek_control_fpga_write(comm_rt, 0x02, rate_setup[rate].en_i2s);
-	mytek_control_fpga_write(comm_rt, 0x04, rate_setup[rate].en_dsd);
+	mytek_control_fpga_write(comm_rt, 0x02, rt->en_i2s);
+	mytek_control_fpga_write(comm_rt, 0x04, en_dsd);
 	comm_rt->write16(comm_rt, 0x02, 0x03, 0x00, 0x00);	/* Disable SPDIF O and I */
 	comm_rt->write16(comm_rt, 0x02, 0x09, 0x00, 0x01);	/* Set mystery reg 9 to 1 */
 

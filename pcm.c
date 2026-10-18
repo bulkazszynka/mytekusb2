@@ -56,12 +56,33 @@ MODULE_PARM_DESC(zlp_fill,
  * The device mutes its output (GPIO pin 0 low) while the stream is set up
  * and unmutes this long after streaming started, so the DAC's relock on a
  * rate or PCM/DSD change is not heard. prepare() waits for the unmute, so
- * no audio is lost. The Windows driver unmutes after about 500ms.
+ * no audio is lost. The Windows driver unmutes after about 500ms; on the
+ * real DAC 300ms still let rate changes click, 700ms did not (step 08).
  */
-static unsigned int unmute_delay = 300;
+static unsigned int unmute_delay = 700;
 module_param(unmute_delay, uint, 0644);
 MODULE_PARM_DESC(unmute_delay,
-	"Milliseconds between stream start and unmuting the DAC (default 300, max 2000).");
+	"Milliseconds between stream start and unmuting the DAC (default 700, max 2000).");
+
+/*
+ * Stream stop: the DAC is muted mute_delay ms before the stream stops.
+ * DoP streams can additionally send PCM silence for dop_exit ms (still
+ * muted) so the DAC leaves DSD mode while its clock still runs.
+ */
+static unsigned int mute_delay = 20;
+module_param(mute_delay, uint, 0644);
+MODULE_PARM_DESC(mute_delay,
+	"Milliseconds between muting the DAC and stopping the stream (default 20, max 1000).");
+static unsigned int dop_exit;
+module_param(dop_exit, uint, 0644);
+MODULE_PARM_DESC(dop_exit,
+	"Milliseconds of PCM silence after a DSD stream before it stops (default 0, max 1000).");
+
+/* diagnostic: 0 keeps the DAC muted (GPIO 0 low) while streaming */
+static bool unmute = true;
+module_param(unmute, bool, 0644);
+MODULE_PARM_DESC(unmute,
+	"Diagnostic: 0 = never unmute the DAC (checks that GPIO 0 mutes it), default 1.");
 
 /*
  * Native DSD: the DAC takes DSD only as DoP (the Windows driver does the
@@ -86,23 +107,20 @@ MODULE_PARM_DESC(dop352,
 
 enum {
 	OUT_LEAD_MAX = PCM_N_URBS - 4, UNMUTE_DELAY_MAX = 2000,
-	MUTE_SETTLE_MS = 20
+	MUTE_DELAY_MAX = 1000
 };
 
 enum { /* zlp_fill values */
 	ZLP_FILL_NONE, ZLP_FILL_NOMINAL, ZLP_FILL_LEGACY
 };
 
-/* keep next four synced with
+/* keep next three synced with
  * FW_EP_W_MAX_PACKET_SIZE[] and RATES_MAX_PACKET_SIZE
  * and CONTROL_RATE_XXX / rate_setup[] in control.c */
 static const int rates_in_packet_size[] = {
 	228, 228, 420, 420, 404, 404, 420 };
 static const int rates_out_packet_size[] = {
 	228, 228, 420, 420, 604, 604, 420 };
-/* 4 byte slots per frame: 2 for each enabled I2S port */
-static const int rates_out_slots[] = { 6, 6, 6, 6, 6, 6, 2 };
-static const int rates_in_slots[] = { 4, 4, 4, 4, 4, 4, 2 };
 static const int rates[] = {
 	44100, 48000, 88200, 96000, 176400, 192000, 352800 };
 
@@ -335,8 +353,9 @@ static int mytek_pcm_set_rate(struct pcm_runtime *rt)
 		return ret;
 	}
 
-	rt->in_n_analog = rates_in_slots[rt->rate];
-	rt->out_n_analog = rates_out_slots[rt->rate];
+	/* 4 byte slots per frame: 2 for each enabled I2S port */
+	rt->in_n_analog = 2 * hweight8(ctrl_rt->en_i2s & 0xff);
+	rt->out_n_analog = 2 * hweight8(ctrl_rt->en_i2s >> 8);
 	mytek_pcm_setup_endpoints(rt);
 	return 0;
 }
@@ -407,7 +426,13 @@ static void mytek_pcm_stream_stop(struct pcm_runtime *rt)
 		/* mute while the device still gets (silent) frames */
 		if (rt->stream_state == STREAM_RUNNING && !rt->panic) {
 			ctrl_rt->set_mute(ctrl_rt, true);
-			msleep(MUTE_SETTLE_MS);
+			msleep(min_t(unsigned int, READ_ONCE(mute_delay),
+				     MUTE_DELAY_MAX));
+			if (rt->dop && READ_ONCE(dop_exit)) {
+				rt->dop = false;	/* idle frames: PCM zeros */
+				msleep(min_t(unsigned int, READ_ONCE(dop_exit),
+					     MUTE_DELAY_MAX));
+			}
 		}
 
 		rt->stream_state = STREAM_STOPPING;
@@ -419,6 +444,9 @@ static void mytek_pcm_stream_stop(struct pcm_runtime *rt)
 
 		ctrl_rt->usb_streaming = false;
 		ctrl_rt->update_streaming(ctrl_rt);
+		/* idle in alt 0 between streams, as the Windows driver does */
+		if (!rt->panic)
+			usb_set_interface(rt->chip->dev, 1, 0);
 		rt->stream_state = STREAM_DISABLED;
 		mytek_pcm_log_stats(rt);
 	}
@@ -721,7 +749,8 @@ static int mytek_pcm_stream_start(struct pcm_runtime *rt)
 
 	/* let the DAC lock onto the new stream before it is heard */
 	msleep(min_t(unsigned int, READ_ONCE(unmute_delay), UNMUTE_DELAY_MAX));
-	ctrl_rt->set_mute(ctrl_rt, false);
+	if (READ_ONCE(unmute))
+		ctrl_rt->set_mute(ctrl_rt, false);
 	return 0;
 }
 
@@ -1082,6 +1111,8 @@ static void mytek_pcm_proc_read(struct snd_info_entry *entry,
 		    ? rates[rate] : 0);
 	snd_iprintf(buffer, "dop: %d\n", rt->dop);
 	snd_iprintf(buffer, "unmute_delay: %u\n", READ_ONCE(unmute_delay));
+	snd_iprintf(buffer, "mute_delay: %u\n", READ_ONCE(mute_delay));
+	snd_iprintf(buffer, "dop_exit: %u\n", READ_ONCE(dop_exit));
 	snd_iprintf(buffer, "out_lead: %u\n", rt->out_lead);
 	snd_iprintf(buffer, "zlp_fill: %u\n", rt->zlp_fill);
 	snd_iprintf(buffer, "in_packet_size: %d\n", rt->in_packet_size);

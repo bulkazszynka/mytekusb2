@@ -74,7 +74,24 @@ play S24_LE 176400 s24_176k.raw
 log "unmute_delay=0"
 echo 0 > /sys/module/snd_usb_mytek/parameters/unmute_delay
 play DSD_U32_BE 88200 dsd64_u32be.raw
-echo 300 > /sys/module/snd_usb_mytek/parameters/unmute_delay
+echo 700 > /sys/module/snd_usb_mytek/parameters/unmute_delay
+log "mute_delay=150 dop_exit=100: ~17640 dop_exit_frames, bit-exact"
+echo 150 > /sys/module/snd_usb_mytek/parameters/mute_delay
+echo 100 > /sys/module/snd_usb_mytek/parameters/dop_exit
+play DSD_U16_BE 352800 dsd128_u16be.raw
+echo 20 > /sys/module/snd_usb_mytek/parameters/mute_delay
+echo 0 > /sys/module/snd_usb_mytek/parameters/dop_exit
+log "legacy_ports=1: PCM and DSD64 with the 2.2.0 port setup (W02=0703 W04=0006), bit-exact"
+echo 1 > /sys/module/snd_usb_mytek/parameters/legacy_ports
+play S32_LE 48000 s32_48k.raw
+play DSD_U32_BE 88200 dsd64_u32be.raw
+log "legacy_ports=1 at 352.8k: must still use W02=0101"
+play DSD_U16_LE 352800 dsd128_u16le.raw
+echo 0 > /sys/module/snd_usb_mytek/parameters/legacy_ports
+log "unmute=0 (diagnostic): no G00=01, vendor_seq=MISMATCH expected"
+echo 0 > /sys/module/snd_usb_mytek/parameters/unmute
+play S32_LE 48000 s32_48k.raw
+echo 1 > /sys/module/snd_usb_mytek/parameters/unmute
 log "DSD with zero-length feedback every 37 packets"
 kill $EMU; sleep 1
 /mytek-emu -z 37 & EMU=$!; wait_card

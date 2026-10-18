@@ -63,9 +63,16 @@ DSD256 is not supported by the DAC.
 * `out_lead` (0-12, default 6): ms of playback queued ahead; 0 = 1.x behaviour
 * `zlp_fill` (default 1): frames for an empty feedback packet:
   0 = none, 1 = nominal, 2 = 5 (1.x)
-* `unmute_delay` (0-2000, default 300): ms between stream start and
+* `unmute_delay` (0-2000, default 700): ms between stream start and
   unmuting the DAC (GPIO 0), so the relock on rate changes is not heard;
   the device open/prepare waits for it, no audio is lost
+* `mute_delay` (0-1000, default 20): ms the DAC is muted before a stream
+  stops; `dop_exit` (0-1000, default 0): ms of PCM silence (still muted)
+  after a DSD stream before it stops
+* `unmute` (default 1): diagnostic, 0 keeps the DAC muted
+* `legacy_ports` (default 0): up to 192k use the I2S port setup of driver
+  <= 2.2.0 (ports 0-2, ports 1/2 as DSD ports) instead of the Windows
+  driver's port 0 only
 * `dsd` (default 1): offer the native DSD formats (read at open)
 * `dop352` (default 0): accept 24/32 bit PCM at 352.8 kHz, only for
   player-made DoP DSD128 (read at open)

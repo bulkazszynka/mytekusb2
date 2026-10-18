@@ -80,6 +80,7 @@ static volatile sig_atomic_t dump_req;
 
 /* device state */
 static int altsetting;
+static int stream_alt; /* last alt setting != 0 */
 /* alt 4: 352.8/384k; 5/6 (vendor native DSD, unused): 44.1k/88.2k frames */
 static const int alt_rate_base[] = { 0, 44100, 88200, 176400, 352800,
 				     44100, 88200 };
@@ -104,7 +105,7 @@ static long in_pkt_count, out_urb_count;
 /* verification */
 static unsigned long long frames_rx, silence_rx, disc, bad_hdr, bad_marker,
 	in_urbs_tx, out_urbs_rx, underruns, zlp_injected, err_injected,
-	exdev_injected, pkt_frames_hist[64], dop_frames_rx;
+	exdev_injected, pkt_frames_hist[64], dop_frames_rx, dop_exit_rx;
 static uint32_t last_l;
 static int have_last;
 static int out_started;
@@ -245,7 +246,7 @@ static int in_slots(void)
 static int cur_rate(void)
 {
 	/* reg 1: vh 0x11 -> 44.1/48, 0x10 -> 88.2/96, 0x00 -> 176.4/192 */
-	int base = alt_rate_base[altsetting];
+	int base = alt_rate_base[altsetting ? altsetting : stream_alt];
 
 	if (rate_reg_vl == 1)
 		base = base / 147 * 160;
@@ -276,10 +277,14 @@ static void handle_control(struct hdr *h, uint8_t *out_data)
 		} else if (req == 11) { /* SET_INTERFACE */
 			if (index == 1) {
 				altsetting = value;
-				seq_n = 0;
-				dop_stream = -1;
-				last_marker = -1;
-				clock_gettime(CLOCK_MONOTONIC, &seq_t0);
+				/* alt 0 = idle between streams (2.2.1+) */
+				if (value) {
+					stream_alt = value;
+					seq_n = 0;
+					dop_stream = -1;
+					last_marker = -1;
+					clock_gettime(CLOCK_MONOTONIC, &seq_t0);
+				}
 				fprintf(stderr, "emu: interface 1 alt %d\n",
 					value);
 			}
@@ -357,6 +362,13 @@ static void verify_dop_frame(const uint8_t *fr)
 
 	frames_rx++;
 	dop_frames_rx++;
+	/* dop_exit: PCM silence (no marker) before the stream stops */
+	if (!(fr[0] | fr[1] | fr[2] | fr[4] | fr[5] | fr[6])) {
+		silence_rx++;
+		dop_exit_rx++;
+		last_marker = -1;
+		return;
+	}
 	if ((m != 0x05 && m != 0xfa) || fr[6] != m || m == last_marker)
 		bad_marker++;
 	last_marker = m;
@@ -465,9 +477,9 @@ static void dump_stats(const char *why)
 	else
 		printf(" | vendor_seq=MISMATCH\n");
 
-	printf("EMU-MODE: alt=%d clk=0x%02x%02x en_i2s=0x%04x en_dsd=0x%04x reg6=0x%04x dop=%d dop_frames=%llu\n",
-	       altsetting, rate_reg_vl & 0xff, rate_reg_vh & 0xff, en_i2s,
-	       en_dsd, reg6, dop_stream, dop_frames_rx);
+	printf("EMU-MODE: alt=%d clk=0x%02x%02x en_i2s=0x%04x en_dsd=0x%04x reg6=0x%04x dop=%d dop_frames=%llu dop_exit_frames=%llu\n",
+	       stream_alt, rate_reg_vl & 0xff, rate_reg_vh & 0xff, en_i2s,
+	       en_dsd, reg6, dop_stream, dop_frames_rx, dop_exit_rx);
 	printf("EMU-STATS(%s): rate=%d in_urbs=%llu out_urbs=%llu frames=%llu silence=%llu signal=%llu discontinuities=%llu bad_hdr=%llu bad_marker=%llu underruns=%llu zlp_inj=%llu err_inj=%llu exdev_inj=%llu last_sample=%u\n",
 	       why, cur_rate(), in_urbs_tx, out_urbs_rx, frames_rx, silence_rx,
 	       frames_rx - silence_rx, disc, bad_hdr, bad_marker, underruns,
@@ -479,7 +491,7 @@ static void dump_stats(const char *why)
 	printf("\n");
 	fflush(stdout);
 	frames_rx = silence_rx = disc = bad_hdr = bad_marker = 0;
-	in_urbs_tx = out_urbs_rx = underruns = dop_frames_rx = 0;
+	in_urbs_tx = out_urbs_rx = underruns = dop_frames_rx = dop_exit_rx = 0;
 	zlp_injected = err_injected = exdev_injected = 0;
 	memset(pkt_frames_hist, 0, sizeof(pkt_frames_hist));
 	have_last = 0;
