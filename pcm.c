@@ -76,7 +76,7 @@ MODULE_PARM_DESC(mute_delay,
 static unsigned int dop_exit;
 module_param(dop_exit, uint, 0644);
 MODULE_PARM_DESC(dop_exit,
-	"Milliseconds of PCM silence after a DSD stream before it stops (default 0, max 1000).");
+	"Milliseconds of PCM silence after a DSD stream before it stops (default 0, max 5000).");
 
 /*
  * Idle frames of a DSD stream before the first playback data: DoP
@@ -117,7 +117,7 @@ MODULE_PARM_DESC(dop352,
 
 enum {
 	OUT_LEAD_MAX = PCM_N_URBS - 4, UNMUTE_DELAY_MAX = 2000,
-	MUTE_DELAY_MAX = 1000
+	MUTE_DELAY_MAX = 1000, DOP_EXIT_MAX = 5000
 };
 
 enum { /* zlp_fill values */
@@ -441,7 +441,7 @@ static void mytek_pcm_stream_stop(struct pcm_runtime *rt)
 			if (rt->dop && READ_ONCE(dop_exit)) {
 				rt->dop = false;	/* idle frames: PCM zeros */
 				msleep(min_t(unsigned int, READ_ONCE(dop_exit),
-					     MUTE_DELAY_MAX));
+					     DOP_EXIT_MAX));
 			}
 		}
 

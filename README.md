@@ -67,7 +67,7 @@ DSD256 is not supported by the DAC.
   unmuting the DAC (GPIO 0), so the relock on rate changes is not heard;
   the device open/prepare waits for it, no audio is lost
 * `mute_delay` (0-1000, default 20): ms the DAC is muted before a stream
-  stops; `dop_exit` (0-1000, default 0): ms of PCM silence (still muted)
+  stops; `dop_exit` (0-5000, default 0): ms of PCM silence (still muted)
   after a DSD stream before it stops
 * `dop_preroll` (default 1): what a DSD stream sends before the music:
   1 = DoP silence, 0 = PCM zeros (the DAC switches to DSD only when the
