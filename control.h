@@ -29,14 +29,14 @@ enum {
 	CONTROL_RATE_96KHZ,
 	CONTROL_RATE_176KHZ,
 	CONTROL_RATE_192KHZ,
+	CONTROL_RATE_352KHZ,	/* DoP DSD128 only, see pcm.c */
 	CONTROL_N_RATES
 };
 
 struct control_runtime {
 	int (*update_streaming)(struct control_runtime *rt);
 	int (*set_rate)(struct control_runtime *rt, int rate);
-	int (*set_channels)(struct control_runtime *rt, int n_analog_out,
-		int n_analog_in, bool spdif_out, bool spdif_in);
+	int (*set_mute)(struct control_runtime *rt, bool mute);
 
 	struct mytek_chip *chip;
 

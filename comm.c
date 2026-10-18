@@ -15,8 +15,27 @@
  * (at your option) any later version.
  */
 
+#include <linux/module.h>
+#include <linux/moduleparam.h>
+
 #include "comm.h"
 #include "chip.h"
+
+/*
+ * Diagnostic: log every comm message at info level. Dynamic debug (the
+ * dev_dbg below) is not available under Secure Boot lockdown.
+ */
+static bool comm_log;
+module_param(comm_log, bool, 0644);
+MODULE_PARM_DESC(comm_log,
+	"Diagnostic: log every comm message (FPGA register writes/read-backs, GPIOs) in the kernel log (default off).");
+
+#define comm_msg(dev, fmt, ...) do {				\
+	if (READ_ONCE(comm_log))				\
+		dev_info(dev, fmt, ##__VA_ARGS__);		\
+	else							\
+		dev_dbg(dev, fmt, ##__VA_ARGS__);		\
+} while (0)
 
 enum {
 	COMM_EP = 1,
@@ -46,6 +65,11 @@ static void mytek_comm_receiver_handler(struct urb *urb)
 	case -EPERM:		/* poisoned */
 		return;
 	}
+
+	/* replies to register reads etc.; comm_log or dynamic debug */
+	if (!urb->status && urb->actual_length > 0)
+		comm_msg(&urb->dev->dev, "comm <- %*ph\n",
+			min_t(int, urb->actual_length, 16), rt->receiver_buffer);
 
 	if (!rt->chip->shutdown) {
 		urb->status = 0;
@@ -98,6 +122,7 @@ static int mytek_comm_send_buffer(u8 *buffer, struct usb_device *dev)
 	int ret;
 	int actual_len;
 
+	comm_msg(&dev->dev, "comm -> %*ph\n", buffer[1] + 2, buffer);
 	ret = usb_interrupt_msg(dev, usb_sndintpipe(dev, COMM_EP),
 			buffer, buffer[1] + 2, &actual_len, 1000);
 	if (ret < 0)

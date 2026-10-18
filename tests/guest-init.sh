@@ -11,8 +11,8 @@ wait_card() {
 }
 play() { # fmt rate file [extra aplay args]
 	log "play $1 @ $2"
-	aplay -q -D hw:0,0 -f $1 -r $2 -c 2 -t raw --buffer-size=$(($2 / 2)) $4 /data/$3 ; echo "aplay exit=$?"
-	grep -v -E '^(driver_version|state|rate|zlp_fill|out_lead|in_packet_size|out_packet_size|packets_per_sec):' /proc/asound/card0/mytek | tr '\n' ' '; echo
+	aplay -q -D hw:0,0 -f $1 -r $2 -c 2 -t raw --buffer-size=$2 $4 /data/$3 ; echo "aplay exit=$?"
+	grep -v -E '^(driver_version|state|zlp_fill|out_lead|in_packet_size|out_packet_size|packets_per_sec):' /proc/asound/card0/mytek | tr '\n' ' '; echo
 	dmesg -c | tee -a /tmp/klog | grep -v -E 'callbacks suppressed' | tail -8
 	emu_stats
 }
@@ -34,6 +34,52 @@ aplay -q -D hw:0,0 -f S32_LE -r 48000 -c 1 -t raw -d 1 /dev/zero; echo "aplay mo
 log "pause/resume and small period"
 aplay -q -D hw:0,0 -f S32_LE -r 48000 -c 2 -t raw --period-size=600 --buffer-size=4800 /data/s32_48k.raw; echo "aplay exit=$?"
 emu_stats
+
+# accepted rates per format (aplay -r would silently fall back to the
+# nearest allowed rate, so refusals are checked with tests/alsa-rates.c)
+log "rates per format: PCM must end at 192k (DAC limit); S32 352.8k only with dop352=1"
+/alsa-rates hw:0,0 S24_LE S32_LE DSD_U8 DSD_U16_LE DSD_U16_BE DSD_U32_LE DSD_U32_BE
+echo 1 > /sys/module/snd_usb_mytek/parameters/dop352
+log "dop352=1"
+/alsa-rates hw:0,0 S24_LE S32_LE
+echo 0 > /sys/module/snd_usb_mytek/parameters/dop352
+log "dsd=0"
+echo 0 > /sys/module/snd_usb_mytek/parameters/dsd
+/alsa-rates hw:0,0 S32_LE DSD_U8 DSD_U32_BE
+echo 1 > /sys/module/snd_usb_mytek/parameters/dsd
+log "dop352=1: S32 at 352.8k (player-made DoP; alt 4, port 0 only)"
+echo 1 > /sys/module/snd_usb_mytek/parameters/dop352
+play S32_LE 352800 s32_352k.raw
+echo 0 > /sys/module/snd_usb_mytek/parameters/dop352
+log "hw params offered"
+aplay -D hw:0,0 --dump-hw-params -t raw -d 1 /dev/zero 2>&1 | grep -E 'FORMAT|RATE'
+log "DSD64 as DoP at 176.4k, every DSD format"
+play DSD_U8 352800 dsd64_u8.raw
+play DSD_U16_LE 176400 dsd64_u16le.raw
+play DSD_U16_BE 176400 dsd64_u16be.raw
+play DSD_U32_LE 88200 dsd64_u32le.raw
+play DSD_U32_BE 88200 dsd64_u32be.raw
+log "DSD128 as DoP at 352.8k"
+play DSD_U8 705600 dsd128_u8.raw
+play DSD_U16_BE 352800 dsd128_u16be.raw
+play DSD_U32_LE 176400 dsd128_u32le.raw
+play DSD_U32_BE 176400 dsd128_u32be.raw
+log "dsd=0: DSD formats must be refused"
+echo 0 > /sys/module/snd_usb_mytek/parameters/dsd
+aplay -q -D hw:0,0 -f DSD_U32_BE -r 88200 -c 2 -t raw -d 1 /dev/zero; echo "aplay dsd (param off) exit=$?"
+echo 1 > /sys/module/snd_usb_mytek/parameters/dsd
+log "PCM again after DSD"
+play S32_LE 48000 s32_48k.raw
+play S24_LE 176400 s24_176k.raw
+log "unmute_delay=0"
+echo 0 > /sys/module/snd_usb_mytek/parameters/unmute_delay
+play DSD_U32_BE 88200 dsd64_u32be.raw
+echo 300 > /sys/module/snd_usb_mytek/parameters/unmute_delay
+log "DSD with zero-length feedback every 37 packets"
+kill $EMU; sleep 1
+/mytek-emu -z 37 & EMU=$!; wait_card
+play DSD_U32_BE 88200 dsd64_u32be.raw
+play DSD_U16_LE 352800 dsd128_u16le.raw
 kill $EMU; sleep 1
 
 log "zero-length feedback packets every 37 packets (zlp_fill=1)"

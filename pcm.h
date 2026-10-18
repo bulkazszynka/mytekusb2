@@ -4,7 +4,7 @@
  * Based on 6fire usb driver
  *
  * Adapted for Mytek by	: Jurgen Kramer
- * Last updated		: Oct 15, 2026
+ * Last updated		: Oct 18, 2026
  * Copyright		: (C) Jurgen Kramer
  *
  * This program is free software; you can redistribute it and/or modify
@@ -44,6 +44,10 @@ struct pcm_substream {
 
 	snd_pcm_uframes_t dma_off; /* current position in alsa dma_area */
 	snd_pcm_uframes_t period_off; /* current position in current period */
+	unsigned int dsd_bytes; /* DSD bytes per channel and frame, 0 = PCM */
+	unsigned int dsd_pos; /* next DSD byte in the current frame */
+	bool dsd_le; /* DSD bytes stored in reverse order (_LE formats) */
+	bool pcm352; /* dop352 param at open: PCM formats allowed at 352.8k */
 };
 
 /*
@@ -101,6 +105,8 @@ struct pcm_runtime {
 	struct mutex stream_mutex;
 	u8 stream_state; /* one of STREAM_XXX (pcm.c) */
 	u8 rate; /* one of PCM_RATE_XXX */
+	bool dop; /* DSD stream: device frames are DoP, idle = DSD silence */
+	bool dop_marker; /* next DoP marker: 0 = 0x05, 1 = 0xfa */
 	wait_queue_head_t stream_wait_queue;
 	bool stream_wait_cond;
 

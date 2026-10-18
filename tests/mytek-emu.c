@@ -8,6 +8,14 @@
  * (iso IN) packets at the nominal rate of the selected sample rate and
  * consumes iso OUT urbs at the same pace, verifying the playback data:
  * the test signal is a ramp, left = n, right = ~n (24 bit), n = 1, 2, ...
+ * DoP streams (detected by the first frame after SET_INTERFACE: DSD
+ * silence 0x69 with a DoP marker) are checked as DoP: markers 0x05/0xfa
+ * alternating every frame in both channels, the 16 DSD bits per channel
+ * (earlier byte in the middle byte) a ramp left = n, right = ~n (16 bit);
+ * 0x6969 = silence.
+ * The comm sequence of each stream is compared with the Windows driver's
+ * (USB capture): rate setup, streaming on, unmute (GPIO 0 high, reg 6 =
+ * 2), and at the end mute (GPIO 0 low, reg 6 = 0), streaming off.
  *
  * Usage: mytek-emu [-z every_n_packets_zlp] [-e every_n_packets_err]
  *                  [-x every_n_out_urbs_exdev] [-d seconds_until_disconnect]
@@ -72,9 +80,22 @@ static volatile sig_atomic_t dump_req;
 
 /* device state */
 static int altsetting;
-static const int alt_rate_base[] = { 0, 44100, 88200, 176400 };
+/* alt 4: 352.8/384k; 5/6 (vendor native DSD, unused): 44.1k/88.2k frames */
+static const int alt_rate_base[] = { 0, 44100, 88200, 176400, 352800,
+				     44100, 88200 };
 static int rate_reg_vh = -1, rate_reg_vl = -1;
+/* FPGA regs 2 (EN_I2S: out mask << 8 | in mask) and 4 (EN_DSD) */
+static int en_i2s = 0x0707, en_dsd = 0x0006, reg6;
+/* comm writes since the last SET_INTERFACE: "Wrr=vvvv" FPGA register
+ * writes, "Grr=vv" GPIO set; register reads (reg | 0x80) are not logged */
+static char seq[64][12];
+static long seq_ms[64];
+static int seq_n;
 static int streaming;
+static struct timespec seq_t0;
+/* stream type from the first frame after SET_INTERFACE: -1 unknown */
+static int dop_stream = -1;
+static int last_marker = -1;
 
 /* injection */
 static long zlp_every, err_every, exdev_every;
@@ -83,7 +104,7 @@ static long in_pkt_count, out_urb_count;
 /* verification */
 static unsigned long long frames_rx, silence_rx, disc, bad_hdr, bad_marker,
 	in_urbs_tx, out_urbs_rx, underruns, zlp_injected, err_injected,
-	exdev_injected, pkt_frames_hist[32];
+	exdev_injected, pkt_frames_hist[64], dop_frames_rx;
 static uint32_t last_l;
 static int have_last;
 static int out_started;
@@ -136,6 +157,16 @@ static void build_cfg(void)
 	iface(1, 3, 2);
 	ep(0x82, 0x05, 404, 1);
 	ep(0x06, 0x05, 604, 1);
+	/* alts 4-6 as on the real device: firmware default 1024 */
+	iface(1, 4, 2);
+	ep(0x82, 0x05, 1024, 1);
+	ep(0x06, 0x05, 1024, 1);
+	iface(1, 5, 2);
+	ep(0x82, 0x05, 1024, 1);
+	ep(0x06, 0x05, 1024, 1);
+	iface(1, 6, 2);
+	ep(0x82, 0x05, 1024, 1);
+	ep(0x06, 0x05, 1024, 1);
 	cfg_desc[2] = cfg_len & 0xff;
 	cfg_desc[3] = cfg_len >> 8;
 }
@@ -196,6 +227,21 @@ static void send_ret(uint32_t seqnum, int dir, int ep, int status,
 	}
 }
 
+static int popcount8(int v)
+{
+	return __builtin_popcount(v & 0xff);
+}
+
+static int out_slots(void)
+{
+	return 2 * popcount8(en_i2s >> 8);
+}
+
+static int in_slots(void)
+{
+	return 2 * popcount8(en_i2s);
+}
+
 static int cur_rate(void)
 {
 	/* reg 1: vh 0x11 -> 44.1/48, 0x10 -> 88.2/96, 0x00 -> 176.4/192 */
@@ -230,6 +276,10 @@ static void handle_control(struct hdr *h, uint8_t *out_data)
 		} else if (req == 11) { /* SET_INTERFACE */
 			if (index == 1) {
 				altsetting = value;
+				seq_n = 0;
+				dop_stream = -1;
+				last_marker = -1;
+				clock_gettime(CLOCK_MONOTONIC, &seq_t0);
 				fprintf(stderr, "emu: interface 1 alt %d\n",
 					value);
 			}
@@ -261,22 +311,71 @@ static void handle_control(struct hdr *h, uint8_t *out_data)
 	send_ret(h->seqnum, h->direction, 0, status, buf, len, 0, NULL);
 }
 
+static void seq_add(void)
+{
+	struct timespec now;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	seq_ms[seq_n] = (now.tv_sec - seq_t0.tv_sec) * 1000 +
+			(now.tv_nsec - seq_t0.tv_nsec) / 1000000;
+	seq_n++;
+}
+
 static void handle_comm(const uint8_t *b, int len)
 {
 	/* 01 len req id reg vl vh */
+	if (len >= 6 && b[0] == 0x01 && b[2] == 0x22 && seq_n < 64) {
+		snprintf(seq[seq_n], sizeof(seq[0]), "G%02x=%02x", b[4], b[5]);
+		seq_add();
+	}
+	if (len >= 7 && b[0] == 0x01 && b[2] == 0x02 && !(b[4] & 0x80) &&
+	    seq_n < 64) {
+		snprintf(seq[seq_n], sizeof(seq[0]), "W%02x=%02x%02x", b[4],
+			 b[5], b[6]);
+		seq_add();
+	}
 	if (len >= 7 && b[0] == 0x01 && b[2] == 0x02) {
 		if (b[4] == 0x01) {
 			rate_reg_vl = b[5];
 			rate_reg_vh = b[6];
 		} else if (b[4] == 0x00) {
 			streaming = b[6];
+		} else if (b[4] == 0x02) {
+			en_i2s = b[5] << 8 | b[6];
+		} else if (b[4] == 0x04) {
+			en_dsd = b[5] << 8 | b[6];
+		} else if (b[4] == 0x06) {
+			reg6 = b[5] << 8 | b[6];
 		}
 	}
+}
+
+static void verify_dop_frame(const uint8_t *fr)
+{
+	int m = fr[2];
+	uint32_t l = fr[1] << 8 | fr[0], r = fr[5] << 8 | fr[4];
+
+	frames_rx++;
+	dop_frames_rx++;
+	if ((m != 0x05 && m != 0xfa) || fr[6] != m || m == last_marker)
+		bad_marker++;
+	last_marker = m;
+	if (l == 0x6969 && r == 0x6969) {
+		silence_rx++;
+		return;
+	}
+	if (r != (~l & 0xffff) ||
+	    (have_last && l != ((last_l + 1) & 0xffff)) ||
+	    (!have_last && l != 1))
+		disc++;
+	last_l = l;
+	have_last = 1;
 }
 
 static void verify_out(struct pending *p)
 {
 	int i;
+	int slots = out_slots();
 
 	for (i = 0; i < p->npackets; i++) {
 		const uint8_t *b = p->data + p->iso[i].offset;
@@ -288,20 +387,27 @@ static void verify_out(struct pending *p)
 			continue;
 		}
 		n = b[2];
-		if (plen != 4 + n * 24) {
+		if (plen != 4 + n * slots * 4) {
 			bad_hdr++;
 			continue;
 		}
-		if (n < 32)
+		if (n < 64)
 			pkt_frames_hist[n]++;
 		for (f = 0; f < n; f++) {
-			const uint8_t *fr = b + 4 + f * 24;
+			const uint8_t *fr = b + 4 + f * slots * 4;
 			uint32_t l = fr[0] | fr[1] << 8 | fr[2] << 16;
 			uint32_t r = fr[4] | fr[5] << 8 | fr[6] << 16;
 
-			for (ch = 0; ch < 6; ch++)
+			for (ch = 0; ch < slots; ch++)
 				if (fr[ch * 4 + 3] != 0x40)
 					bad_marker++;
+			if (dop_stream < 0)
+				dop_stream = fr[0] == 0x69 &&
+					     (fr[2] == 0x05 || fr[2] == 0xfa);
+			if (dop_stream) {
+				verify_dop_frame(fr);
+				continue;
+			}
 			frames_rx++;
 			if (l == 0 && r == 0) {
 				silence_rx++;
@@ -317,22 +423,63 @@ static void verify_out(struct pending *p)
 	}
 }
 
+/*
+ * Register sequence of one stream as the Windows driver sends it (USB
+ * capture 2026-10-18, minus its read-backs): GPIO 0 low, streaming off,
+ * CLK_SEL, streaming off, OUT_DEL, EN_I2S, EN_DSD, EN_SPDIF, reg 9,
+ * streaming on, unmute (GPIO 0 high, reg 6 = 2); at the end mute (GPIO 0
+ * low, reg 6 = 0), streaming off. Returns the ms from streaming on to the
+ * unmute, or -1 on a mismatch.
+ */
+static long check_seq(void)
+{
+	char exp[15][12] = { "G00=00", "W00=0000", "", "W00=0000",
+			     "W05=0000", "", "", "W03=0000", "W09=0001",
+			     "W00=0001", "G00=01", "W06=0002", "G00=00",
+			     "W06=0000", "W00=0000" };
+	int i;
+
+	snprintf(exp[2], sizeof(exp[2]), "W01=%02x%02x", rate_reg_vl & 0xff,
+		 rate_reg_vh & 0xff);
+	snprintf(exp[5], sizeof(exp[5]), "W02=%04x", en_i2s);
+	snprintf(exp[6], sizeof(exp[6]), "W04=%04x", en_dsd);
+	if (seq_n != 15)
+		return -1;
+	for (i = 0; i < 15; i++)
+		if (strcmp(seq[i], exp[i]))
+			return -1;
+	return seq_ms[10] - seq_ms[9];
+}
+
 static void dump_stats(const char *why)
 {
 	int i;
 
+	long unmute_ms = check_seq();
+
+	printf("EMU-SEQ:");
+	for (i = 0; i < seq_n; i++)
+		printf(" %s", seq[i]);
+	if (unmute_ms >= 0)
+		printf(" | vendor_seq=OK unmute_after=%ldms\n", unmute_ms);
+	else
+		printf(" | vendor_seq=MISMATCH\n");
+
+	printf("EMU-MODE: alt=%d clk=0x%02x%02x en_i2s=0x%04x en_dsd=0x%04x reg6=0x%04x dop=%d dop_frames=%llu\n",
+	       altsetting, rate_reg_vl & 0xff, rate_reg_vh & 0xff, en_i2s,
+	       en_dsd, reg6, dop_stream, dop_frames_rx);
 	printf("EMU-STATS(%s): rate=%d in_urbs=%llu out_urbs=%llu frames=%llu silence=%llu signal=%llu discontinuities=%llu bad_hdr=%llu bad_marker=%llu underruns=%llu zlp_inj=%llu err_inj=%llu exdev_inj=%llu last_sample=%u\n",
 	       why, cur_rate(), in_urbs_tx, out_urbs_rx, frames_rx, silence_rx,
 	       frames_rx - silence_rx, disc, bad_hdr, bad_marker, underruns,
 	       zlp_injected, err_injected, exdev_injected, last_l);
 	printf("EMU-HIST:");
-	for (i = 0; i < 32; i++)
+	for (i = 0; i < 64; i++)
 		if (pkt_frames_hist[i])
 			printf(" %d:%llu", i, pkt_frames_hist[i]);
 	printf("\n");
 	fflush(stdout);
 	frames_rx = silence_rx = disc = bad_hdr = bad_marker = 0;
-	in_urbs_tx = out_urbs_rx = underruns = 0;
+	in_urbs_tx = out_urbs_rx = underruns = dop_frames_rx = 0;
 	zlp_injected = err_injected = exdev_injected = 0;
 	memset(pkt_frames_hist, 0, sizeof(pkt_frames_hist));
 	have_last = 0;
@@ -366,7 +513,7 @@ static void tick(void)
 	i = find_oldest(2, DIR_IN);
 	if (i >= 0) {
 		struct pending *p = &pend[i];
-		uint8_t buf[MAX_PKTS * 604];
+		uint8_t buf[MAX_PKTS * 1024];
 		int total = 0;
 		int rate = cur_rate();
 
@@ -377,7 +524,7 @@ static void tick(void)
 			nominal_acc += rate;
 			frames = nominal_acc / 8000;
 			nominal_acc %= 8000;
-			len = 4 + frames * 16;
+			len = 4 + frames * in_slots() * 4;
 			in_pkt_count++;
 			p->iso[k].status = 0;
 			if (zlp_every && in_pkt_count % zlp_every == 0) {

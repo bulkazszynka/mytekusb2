@@ -6,7 +6,7 @@
  * Based on 6fire usb driver
  *
  * Adapted for Mytek by	: Jurgen Kramer
- * Last updated		: Oct 15, 2026
+ * Last updated		: Oct 18, 2026
  * Copyright		: (C) Jurgen Kramer
  *
  * This program is free software; you can redistribute it and/or modify
@@ -16,9 +16,11 @@
  */
 
 #include <linux/bitops.h>
+#include <linux/delay.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <sound/info.h>
+#include <sound/pcm_params.h>
 
 #include "pcm.h"
 #include "chip.h"
@@ -50,28 +52,77 @@ module_param(zlp_fill, uint, 0644);
 MODULE_PARM_DESC(zlp_fill,
 	"Frames sent for an IN packet without feedback: 0 = none, 1 = nominal for the sample rate (default), 2 = always 5 (driver 1.x).");
 
-enum {
-	OUT_N_CHANNELS = 6, IN_N_CHANNELS = 4
-};
+/*
+ * The device mutes its output (GPIO pin 0 low) while the stream is set up
+ * and unmutes this long after streaming started, so the DAC's relock on a
+ * rate or PCM/DSD change is not heard. prepare() waits for the unmute, so
+ * no audio is lost. The Windows driver unmutes after about 500ms.
+ */
+static unsigned int unmute_delay = 300;
+module_param(unmute_delay, uint, 0644);
+MODULE_PARM_DESC(unmute_delay,
+	"Milliseconds between stream start and unmuting the DAC (default 300, max 2000).");
+
+/*
+ * Native DSD: the DAC takes DSD only as DoP (the Windows driver does the
+ * same, USB capture 2026-10-18), so the DSD formats are packed into DoP
+ * frames here: 176.4k frames for DSD64, 352.8k frames for DSD128.
+ */
+static bool dsd = true;
+module_param(dsd, bool, 0644);
+MODULE_PARM_DESC(dsd,
+	"Offer native DSD formats (DSD_U8/U16/U32), sent to the DAC as DoP (default on, read at open).");
+
+/*
+ * The DAC plays PCM up to 192k. 352.8k frames only carry DSD128 as DoP:
+ * the driver uses them for the DSD formats, plain PCM at 352.8k is only
+ * offered on request for players that make DoP themselves - never let a
+ * sound server pick it for real PCM.
+ */
+static bool dop352;
+module_param(dop352, bool, 0644);
+MODULE_PARM_DESC(dop352,
+	"Also accept S24_LE/S32_LE at 352.8kHz, ONLY for players that send DSD128 as DoP themselves; real PCM at this rate is not supported by the DAC (default off, read at open).");
 
 enum {
-	OUT_LEAD_MAX = PCM_N_URBS - 4
+	OUT_LEAD_MAX = PCM_N_URBS - 4, UNMUTE_DELAY_MAX = 2000,
+	MUTE_SETTLE_MS = 20
 };
 
 enum { /* zlp_fill values */
 	ZLP_FILL_NONE, ZLP_FILL_NOMINAL, ZLP_FILL_LEGACY
 };
 
-/* keep next two synced with
+/* keep next four synced with
  * FW_EP_W_MAX_PACKET_SIZE[] and RATES_MAX_PACKET_SIZE
- * and CONTROL_RATE_XXX in control.h */
-static const int rates_in_packet_size[] = { 228, 228, 420, 420, 404, 404 };
-static const int rates_out_packet_size[] = { 228, 228, 420, 420, 604, 604 };
-static const int rates[] = { 44100, 48000, 88200, 96000, 176400, 192000 };
-static const int rates_alsaid[] = {
-	SNDRV_PCM_RATE_44100, SNDRV_PCM_RATE_48000,
-	SNDRV_PCM_RATE_88200, SNDRV_PCM_RATE_96000,
-	SNDRV_PCM_RATE_176400, SNDRV_PCM_RATE_192000 };
+ * and CONTROL_RATE_XXX / rate_setup[] in control.c */
+static const int rates_in_packet_size[] = {
+	228, 228, 420, 420, 404, 404, 420 };
+static const int rates_out_packet_size[] = {
+	228, 228, 420, 420, 604, 604, 420 };
+/* 4 byte slots per frame: 2 for each enabled I2S port */
+static const int rates_out_slots[] = { 6, 6, 6, 6, 6, 6, 2 };
+static const int rates_in_slots[] = { 4, 4, 4, 4, 4, 4, 2 };
+static const int rates[] = {
+	44100, 48000, 88200, 96000, 176400, 192000, 352800 };
+
+/* every rate an alsa stream can have, PCM and DSD */
+static const unsigned int alsa_rates[] = {
+	44100, 48000, 88200, 96000, 176400, 192000, 352800, 705600 };
+
+static const snd_pcm_format_t pcm_formats[] = {
+	SNDRV_PCM_FORMAT_S24_LE, SNDRV_PCM_FORMAT_S32_LE,
+	SNDRV_PCM_FORMAT_DSD_U8,
+	SNDRV_PCM_FORMAT_DSD_U16_LE, SNDRV_PCM_FORMAT_DSD_U16_BE,
+	SNDRV_PCM_FORMAT_DSD_U32_LE, SNDRV_PCM_FORMAT_DSD_U32_BE };
+
+#define MYTEK_PCM_FMTBITS (SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S32_LE)
+#define MYTEK_DSD_FMTBITS (SNDRV_PCM_FMTBIT_DSD_U8 | \
+	SNDRV_PCM_FMTBIT_DSD_U16_LE | SNDRV_PCM_FMTBIT_DSD_U16_BE | \
+	SNDRV_PCM_FMTBIT_DSD_U32_LE | SNDRV_PCM_FMTBIT_DSD_U32_BE)
+
+/* DoP silence byte, the same as alsa's DSD silence */
+enum { DSD_SILENCE = 0x69 };
 
 enum { /* settings for pcm */
 	OUT_EP = 6, IN_EP = 2, MAX_BUFSIZE = 512 * 1024
@@ -95,17 +146,13 @@ static const struct snd_pcm_hardware pcm_hw = {
 		SNDRV_PCM_INFO_MMAP_VALID |
 		SNDRV_PCM_INFO_BATCH,
 
-	.formats = SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S32_LE,
+	.formats = MYTEK_PCM_FMTBITS | MYTEK_DSD_FMTBITS,
 
-	.rates = SNDRV_PCM_RATE_44100 |
-		SNDRV_PCM_RATE_48000 |
-		SNDRV_PCM_RATE_88200 |
-		SNDRV_PCM_RATE_96000 |
-		SNDRV_PCM_RATE_176400 |
-		SNDRV_PCM_RATE_192000,
+	/* the valid rates depend on the format, see the hw rules */
+	.rates = SNDRV_PCM_RATE_KNOT,
 
 	.rate_min = 44100,
-	.rate_max = 192000,
+	.rate_max = 705600,
 	/* stereo DAC: exposing 1-6 channels made sound servers pick mono */
 	.channels_min = 2,
 	.channels_max = 2,
@@ -115,6 +162,95 @@ static const struct snd_pcm_hardware pcm_hw = {
 	.periods_min = 2,
 	.periods_max = 1024
 };
+
+/* bytes per channel and frame of a DSD format, 0 for PCM */
+static unsigned int mytek_pcm_dsd_bytes(snd_pcm_format_t format)
+{
+	switch (format) {
+	case SNDRV_PCM_FORMAT_DSD_U8:
+		return 1;
+	case SNDRV_PCM_FORMAT_DSD_U16_LE:
+	case SNDRV_PCM_FORMAT_DSD_U16_BE:
+		return 2;
+	case SNDRV_PCM_FORMAT_DSD_U32_LE:
+	case SNDRV_PCM_FORMAT_DSD_U32_BE:
+		return 4;
+	default:
+		return 0;
+	}
+}
+
+/*
+ * Index into rates[] of the device rate for an alsa format and rate, or -1.
+ * DoP carries 16 DSD bits per channel and device frame; only DSD64
+ * (176.4k) and DSD128 (352.8k) are possible. PCM stops at 192k unless
+ * dop352 is set (pcm352: the value of dop352 at open).
+ */
+static int mytek_pcm_rate_index(snd_pcm_format_t format, unsigned int rate,
+		bool pcm352)
+{
+	unsigned int bytes = mytek_pcm_dsd_bytes(format);
+	int i;
+
+	if (bytes) {
+		rate = rate * bytes / 2;
+		if (rate != 176400 && rate != 352800)
+			return -1;
+	} else if (rate > 192000 && !(pcm352 && rate == 352800)) {
+		return -1;
+	}
+	for (i = 0; i < ARRAY_SIZE(rates); i++)
+		if (rates[i] == rate)
+			return i;
+	return -1;
+}
+
+/* restrict the rates to those valid for one of the remaining formats */
+static int mytek_pcm_hw_rule_rate(struct snd_pcm_hw_params *params,
+		struct snd_pcm_hw_rule *rule)
+{
+	struct snd_mask *fmt = hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
+	unsigned int list[ARRAY_SIZE(alsa_rates)];
+	unsigned int n = 0;
+	int r, f;
+
+	for (r = 0; r < ARRAY_SIZE(alsa_rates); r++)
+		for (f = 0; f < ARRAY_SIZE(pcm_formats); f++)
+			if (snd_mask_test_format(fmt, pcm_formats[f]) &&
+			    mytek_pcm_rate_index(pcm_formats[f], alsa_rates[r],
+						 (uintptr_t)rule->private) >= 0) {
+				list[n++] = alsa_rates[r];
+				break;
+			}
+	return snd_interval_list(hw_param_interval(params, rule->var),
+				 n, list, 0);
+}
+
+/* drop the formats without a valid rate in the remaining rate interval */
+static int mytek_pcm_hw_rule_format(struct snd_pcm_hw_params *params,
+		struct snd_pcm_hw_rule *rule)
+{
+	struct snd_interval *rate = hw_param_interval(params,
+						      SNDRV_PCM_HW_PARAM_RATE);
+	struct snd_mask *fmt = hw_param_mask(params, rule->var);
+	struct snd_mask old = *fmt;
+	int r, f;
+
+	for (f = 0; f < ARRAY_SIZE(pcm_formats); f++) {
+		if (!snd_mask_test_format(fmt, pcm_formats[f]))
+			continue;
+		for (r = 0; r < ARRAY_SIZE(alsa_rates); r++)
+			if (snd_interval_test(rate, alsa_rates[r]) &&
+			    mytek_pcm_rate_index(pcm_formats[f], alsa_rates[r],
+						 (uintptr_t)rule->private) >= 0)
+				break;
+		if (r == ARRAY_SIZE(alsa_rates))
+			snd_mask_reset(fmt, (__force unsigned int)pcm_formats[f]);
+	}
+	if (snd_mask_empty(fmt))
+		return -EINVAL;
+	return !snd_mask_eq(fmt, &old);
+}
 
 /*
  * Read packet sizes and interval of the iso endpoints from the active
@@ -190,15 +326,6 @@ static int mytek_pcm_set_rate(struct pcm_runtime *rt)
 		return ret;
 	}
 
-	ret = ctrl_rt->set_channels(ctrl_rt, OUT_N_CHANNELS, IN_N_CHANNELS,
-			false, false);
-	if (ret < 0) {
-		dev_err(&rt->chip->dev->dev,
-				"error initializing channels while setting samplerate %d.\n",
-				rates[rt->rate]);
-		return ret;
-	}
-
 	ctrl_rt->usb_streaming = true;
 	ret = ctrl_rt->update_streaming(ctrl_rt);
 	if (ret < 0) {
@@ -208,8 +335,8 @@ static int mytek_pcm_set_rate(struct pcm_runtime *rt)
 		return ret;
 	}
 
-	rt->in_n_analog = IN_N_CHANNELS;
-	rt->out_n_analog = OUT_N_CHANNELS;
+	rt->in_n_analog = rates_in_slots[rt->rate];
+	rt->out_n_analog = rates_out_slots[rt->rate];
 	mytek_pcm_setup_endpoints(rt);
 	return 0;
 }
@@ -277,6 +404,12 @@ static void mytek_pcm_stream_stop(struct pcm_runtime *rt)
 
 	if (rt->stream_state != STREAM_DISABLED) {
 
+		/* mute while the device still gets (silent) frames */
+		if (rt->stream_state == STREAM_RUNNING && !rt->panic) {
+			ctrl_rt->set_mute(ctrl_rt, true);
+			msleep(MUTE_SETTLE_MS);
+		}
+
 		rt->stream_state = STREAM_STOPPING;
 
 		for (i = 0; i < PCM_N_URBS; i++) {
@@ -329,6 +462,58 @@ static struct pcm_urb *mytek_pcm_get_idle_out_urb(struct pcm_runtime *rt)
 	return NULL;
 }
 
+/*
+ * DSD to DoP, call with substream locked. Every device frame carries 16
+ * DSD bits per channel in the low two bytes of the 24 bit sample, the
+ * earlier byte in the middle one, MSB first; the marker byte above it is
+ * already written by mytek_pcm_fill_out_urb(). An alsa frame holds
+ * dsd_bytes DSD bytes per channel in time order (the _LE formats store
+ * them reversed), so it can span several device frames or, for DSD_U8,
+ * half of one: dsd_pos is the next byte in the current alsa frame.
+ */
+static void mytek_pcm_playback_dop(struct pcm_substream *sub,
+		struct pcm_urb *urb)
+{
+	struct pcm_runtime *rt = snd_pcm_substream_chip(sub->instance);
+	struct snd_pcm_runtime *alsa_rt = sub->instance->runtime;
+	struct usb_iso_packet_descriptor *isoc;
+	unsigned int bytes = sub->dsd_bytes;
+	unsigned int frame_bytes = bytes * alsa_rt->channels;
+	unsigned int frame_count;
+	unsigned int frame;
+	unsigned int ch;
+	unsigned int k;
+	unsigned int pos;
+	const u8 *src;
+	int i;
+	u8 *dest;
+
+	for (i = 0; i < PCM_N_PACKETS_PER_URB; i++) {
+		isoc = &urb->instance->iso_frame_desc[i];
+		frame_count = (isoc->length - 4) / (rt->out_n_analog << 2);
+		dest = urb->buffer + isoc->offset + 4;
+		for (frame = 0; frame < frame_count; frame++) {
+			for (k = 0; k < 2; k++) {
+				src = alsa_rt->dma_area +
+					sub->dma_off * frame_bytes;
+				pos = sub->dsd_le ? bytes - 1 - sub->dsd_pos
+						  : sub->dsd_pos;
+				/* k = 0: earlier byte -> byte 1 */
+				for (ch = 0; ch < 2; ch++)
+					dest[(ch << 2) + 1 - k] =
+						src[ch * bytes + pos];
+				if (++sub->dsd_pos < bytes)
+					continue;
+				sub->dsd_pos = 0;
+				sub->period_off++;
+				if (++sub->dma_off >= alsa_rt->buffer_size)
+					sub->dma_off = 0;
+			}
+			dest += rt->out_n_analog << 2;
+		}
+	}
+}
+
 /* call with substream locked */
 static void mytek_pcm_playback(struct pcm_substream *sub,
 		struct pcm_urb *urb)
@@ -348,6 +533,10 @@ static void mytek_pcm_playback(struct pcm_substream *sub,
 	u8 *dest;
 	u32 v;
 
+	if (sub->dsd_bytes) {
+		mytek_pcm_playback_dop(sub, urb);
+		return;
+	}
 	if (alsa_rt->format == SNDRV_PCM_FORMAT_S32_LE)
 		shift = 8;
 	else if (alsa_rt->format == SNDRV_PCM_FORMAT_S24_LE)
@@ -413,19 +602,33 @@ static struct snd_pcm_substream *mytek_pcm_fill_out_urb(
 	}
 	memset(out_urb->buffer, 0, total_length);
 
-	/* packet header and the 4th byte of each sample (0x40 for analog) */
+	/*
+	 * packet header and the 4th byte of each sample (0x40 for analog);
+	 * in DoP mode also the marker and DSD silence for the stereo pair,
+	 * so the DAC stays in DSD mode while no data is played
+	 */
 	dest = out_urb->buffer;
 	for (i = 0; i < PCM_N_PACKETS_PER_URB; i++) {
 		*(dest++) = 0xaa;
 		*(dest++) = 0xaa;
 		*(dest++) = frames[i];
 		*(dest++) = 0x00;
-		for (frame = 0; frame < frames[i]; frame++)
+		for (frame = 0; frame < frames[i]; frame++) {
+			if (rt->dop) {
+				for (channel = 0; channel < 2; channel++) {
+					dest[(channel << 2) + 0] = DSD_SILENCE;
+					dest[(channel << 2) + 1] = DSD_SILENCE;
+					dest[(channel << 2) + 2] =
+						rt->dop_marker ? 0xfa : 0x05;
+				}
+				rt->dop_marker = !rt->dop_marker;
+			}
 			for (channel = 0; channel < rt->out_n_analog;
 					channel++) {
 				dest += 3; /* skip sample data */
 				*(dest++) = 0x40;
 			}
+		}
 	}
 
 	spin_lock_irqsave(&sub->lock, flags);
@@ -446,6 +649,7 @@ static int mytek_pcm_stream_start(struct pcm_runtime *rt)
 {
 	unsigned int frames[PCM_N_PACKETS_PER_URB];
 	struct pcm_urb *out_urb;
+	struct control_runtime *ctrl_rt = rt->chip->control;
 	int ret;
 	int i;
 	int k;
@@ -458,6 +662,7 @@ static int mytek_pcm_stream_start(struct pcm_runtime *rt)
 	rt->out_idle = (1UL << PCM_N_URBS) - 1;
 	rt->out_next = 0;
 	rt->nominal_acc = 0;
+	rt->dop_marker = 0;
 	rt->zlp_fill = READ_ONCE(zlp_fill);
 	rt->out_lead = min_t(unsigned int, READ_ONCE(out_lead), OUT_LEAD_MAX);
 	rt->stream_wait_cond = false;
@@ -513,6 +718,10 @@ static int mytek_pcm_stream_start(struct pcm_runtime *rt)
 		mytek_pcm_stream_stop(rt);
 		return -EIO;
 	}
+
+	/* let the DAC lock onto the new stream before it is heard */
+	msleep(min_t(unsigned int, READ_ONCE(unmute_delay), UNMUTE_DELAY_MAX));
+	ctrl_rt->set_mute(ctrl_rt, false);
 	return 0;
 }
 
@@ -669,23 +878,38 @@ static int mytek_pcm_open(struct snd_pcm_substream *alsa_sub)
 	struct pcm_runtime *rt = snd_pcm_substream_chip(alsa_sub);
 	struct pcm_substream *sub = NULL;
 	struct snd_pcm_runtime *alsa_rt = alsa_sub->runtime;
+	int ret;
 
 	if (rt->panic)
 		return -EPIPE;
 
 	mutex_lock(&rt->stream_mutex);
 	alsa_rt->hw = pcm_hw;
+	if (!READ_ONCE(dsd))
+		alsa_rt->hw.formats = MYTEK_PCM_FMTBITS;
 
-	if (alsa_sub->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-		if (rt->rate < ARRAY_SIZE(rates))
-			alsa_rt->hw.rates = rates_alsaid[rt->rate];
+	if (alsa_sub->stream == SNDRV_PCM_STREAM_PLAYBACK)
 		sub = &rt->playback;
-	}
 
 	if (!sub) {
 		mutex_unlock(&rt->stream_mutex);
 		dev_err(&rt->chip->dev->dev, "invalid stream type.\n");
 		return -EINVAL;
+	}
+
+	sub->pcm352 = READ_ONCE(dop352);
+	ret = snd_pcm_hw_rule_add(alsa_rt, 0, SNDRV_PCM_HW_PARAM_RATE,
+			mytek_pcm_hw_rule_rate, (void *)(uintptr_t)sub->pcm352,
+			SNDRV_PCM_HW_PARAM_FORMAT, -1);
+	if (!ret)
+		ret = snd_pcm_hw_rule_add(alsa_rt, 0,
+				SNDRV_PCM_HW_PARAM_FORMAT,
+				mytek_pcm_hw_rule_format,
+				(void *)(uintptr_t)sub->pcm352,
+				SNDRV_PCM_HW_PARAM_RATE, -1);
+	if (ret) {
+		mutex_unlock(&rt->stream_mutex);
+		return ret;
 	}
 
 	sub->instance = alsa_sub;
@@ -728,6 +952,8 @@ static int mytek_pcm_prepare(struct snd_pcm_substream *alsa_sub)
 	struct pcm_runtime *rt = snd_pcm_substream_chip(alsa_sub);
 	struct pcm_substream *sub = mytek_pcm_get_substream(alsa_sub);
 	struct snd_pcm_runtime *alsa_rt = alsa_sub->runtime;
+	unsigned int dsd_bytes = mytek_pcm_dsd_bytes(alsa_rt->format);
+	int rate;
 	unsigned long flags;
 	int ret;
 
@@ -735,30 +961,35 @@ static int mytek_pcm_prepare(struct snd_pcm_substream *alsa_sub)
 		return -EPIPE;
 	if (!sub)
 		return -ENODEV;
+	rate = mytek_pcm_rate_index(alsa_rt->format, alsa_rt->rate,
+				    sub->pcm352);
+	if (rate < 0) {
+		dev_err(&rt->chip->dev->dev, "invalid rate %d in prepare.\n",
+			alsa_rt->rate);
+		return -EINVAL;
+	}
 
 	mutex_lock(&rt->stream_mutex);
 	spin_lock_irqsave(&sub->lock, flags);
 	sub->dma_off = 0;
 	sub->period_off = 0;
+	sub->dsd_pos = 0;
+	sub->dsd_bytes = dsd_bytes;
+	sub->dsd_le = alsa_rt->format == SNDRV_PCM_FORMAT_DSD_U16_LE ||
+		      alsa_rt->format == SNDRV_PCM_FORMAT_DSD_U32_LE;
 	spin_unlock_irqrestore(&sub->lock, flags);
 
-	/* hw_params may have changed the rate without closing the device */
+	/*
+	 * hw_params may have changed the rate or switched between PCM and
+	 * DSD without closing the device
+	 */
 	if (rt->stream_state != STREAM_DISABLED &&
-			rates[rt->rate] != alsa_rt->rate)
+			(rt->rate != rate || rt->dop != !!dsd_bytes))
 		mytek_pcm_stream_stop(rt);
 
 	if (rt->stream_state == STREAM_DISABLED) {
-		for (rt->rate = 0; rt->rate < ARRAY_SIZE(rates); rt->rate++)
-			if (alsa_rt->rate == rates[rt->rate])
-				break;
-		if (rt->rate == ARRAY_SIZE(rates)) {
-			mutex_unlock(&rt->stream_mutex);
-			dev_err(&rt->chip->dev->dev,
-				"invalid rate %d in prepare.\n",
-				alsa_rt->rate);
-			return -EINVAL;
-		}
-
+		rt->rate = rate;
+		rt->dop = !!dsd_bytes;
 		ret = mytek_pcm_set_rate(rt);
 		if (ret) {
 			rt->rate = ARRAY_SIZE(rates);
@@ -849,6 +1080,8 @@ static void mytek_pcm_proc_read(struct snd_info_entry *entry,
 		    ? stream_state_names[state] : "?");
 	snd_iprintf(buffer, "rate: %d\n", rate < ARRAY_SIZE(rates)
 		    ? rates[rate] : 0);
+	snd_iprintf(buffer, "dop: %d\n", rt->dop);
+	snd_iprintf(buffer, "unmute_delay: %u\n", READ_ONCE(unmute_delay));
 	snd_iprintf(buffer, "out_lead: %u\n", rt->out_lead);
 	snd_iprintf(buffer, "zlp_fill: %u\n", rt->zlp_fill);
 	snd_iprintf(buffer, "in_packet_size: %d\n", rt->in_packet_size);

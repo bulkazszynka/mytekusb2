@@ -338,7 +338,17 @@ static int mytek_fw_fpga_upload(
 		}
 	}
 	release_firmware(fw);
+
+	/* 16 bytes 0xff after the bitstream (extra configuration clocks), as
+	 * the vendor drivers do (FpgaConfigLoader::DownloadConfiguration) */
+	memset(buffer, 0xff, 16);
+	ret = mytek_fw_fpga_write(device, buffer, 16);
 	kfree(buffer);
+	if (ret < 0) {
+		dev_err(&intf->dev,
+			"unable to upload fpga firmware: padding urb.\n");
+		return ret;
+	}
 
 	ret = mytek_fw_ezusb_write(device, 9, 0, NULL, 0);
 	if (ret < 0) {
