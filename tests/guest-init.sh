@@ -80,12 +80,12 @@ echo 150 > /sys/module/snd_usb_mytek/parameters/mute_delay
 echo 100 > /sys/module/snd_usb_mytek/parameters/dop_exit
 play DSD_U16_BE 352800 dsd128_u16be.raw
 echo 20 > /sys/module/snd_usb_mytek/parameters/mute_delay
-echo 0 > /sys/module/snd_usb_mytek/parameters/dop_exit
-log "dop_preroll=0: PCM zeros before the DoP data (preroll_zero_frames > 0, dop=1), bit-exact"
-echo 0 > /sys/module/snd_usb_mytek/parameters/dop_preroll
+echo 200 > /sys/module/snd_usb_mytek/parameters/dop_exit
+log "dop_preroll=1: DoP silence before the DoP data (preroll_zero_frames=0, dop=1), bit-exact"
+echo 1 > /sys/module/snd_usb_mytek/parameters/dop_preroll
 play DSD_U32_BE 88200 dsd64_u32be.raw
 play DSD_U8 705600 dsd128_u8.raw
-echo 1 > /sys/module/snd_usb_mytek/parameters/dop_preroll
+echo 0 > /sys/module/snd_usb_mytek/parameters/dop_preroll
 log "legacy_ports=1: PCM and DSD64 with the 2.2.0 port setup (W02=0703 W04=0006), bit-exact"
 echo 1 > /sys/module/snd_usb_mytek/parameters/legacy_ports
 play S32_LE 48000 s32_48k.raw

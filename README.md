@@ -67,11 +67,11 @@ DSD256 is not supported by the DAC.
   unmuting the DAC (GPIO 0), so the relock on rate changes is not heard;
   the device open/prepare waits for it, no audio is lost
 * `mute_delay` (0-1000, default 20): ms the DAC is muted before a stream
-  stops; `dop_exit` (0-5000, default 0): ms of PCM silence (still muted)
+  stops; `dop_exit` (0-5000, default 200): ms of PCM silence (still muted)
   after a DSD stream before it stops
-* `dop_preroll` (default 1): what a DSD stream sends before the music:
-  1 = DoP silence, 0 = PCM zeros (the DAC switches to DSD only when the
-  music starts, as with the Windows driver)
+* `dop_preroll` (default 0): what a DSD stream sends before the music:
+  0 = PCM zeros (the DAC switches to DSD only when the music starts, as
+  with the Windows driver), 1 = DoP silence
 * `unmute` (default 1): diagnostic, 0 keeps the DAC muted
 * `legacy_ports` (default 0): up to 192k use the I2S port setup of driver
   <= 2.2.0 (ports 0-2, ports 1/2 as DSD ports) instead of the Windows
@@ -96,6 +96,11 @@ stream (rate/packet sizes, summaries) enable debug messages:
 (audible gap); `in_late`/`in_gap_max_us` show host latency.
 
 ### If clicks return
+
+Known and not fixable in the driver: the DAC itself clicks when it switches
+between PCM and DSD - often when a DSD stream starts, and at the end of DSD128
+streams (display "no lock" afterwards). Gapless DSD playback of the same rate
+does not switch. Everything below is about clicks *during* playback.
 
 1. Note the time of the click, then look at what the driver measured (a
    line is logged for every stream that had problems or a close call, the

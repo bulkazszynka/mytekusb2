@@ -66,27 +66,31 @@ MODULE_PARM_DESC(unmute_delay,
 
 /*
  * Stream stop: the DAC is muted mute_delay ms before the stream stops.
- * DoP streams can additionally send PCM silence for dop_exit ms (still
- * muted) so the DAC leaves DSD mode while its clock still runs.
+ * DoP streams then send PCM silence for dop_exit ms (still muted) so the
+ * DAC leaves DSD mode while its clock still runs: without it DSD64 clicked
+ * at nearly every stop and the display stayed at "DSD" for later PCM
+ * (host steps 09-12). DSD128 still clicks when the DoP data ends, however
+ * long the silence - the DAC's own mode switch.
  */
 static unsigned int mute_delay = 20;
 module_param(mute_delay, uint, 0644);
 MODULE_PARM_DESC(mute_delay,
 	"Milliseconds between muting the DAC and stopping the stream (default 20, max 1000).");
-static unsigned int dop_exit;
+static unsigned int dop_exit = 200;
 module_param(dop_exit, uint, 0644);
 MODULE_PARM_DESC(dop_exit,
-	"Milliseconds of PCM silence after a DSD stream before it stops (default 0, max 5000).");
+	"Milliseconds of PCM silence after a DSD stream before it stops (default 200, max 5000).");
 
 /*
  * Idle frames of a DSD stream before the first playback data: DoP
  * silence, or PCM zeros as the Windows driver sends them (it starts DoP
- * with the music, so the DAC switches to DSD only then).
+ * with the music, so the DAC switches to DSD only then; DSD64 start
+ * clicks: DoP silence 16/18, zeros 8/12 in host steps 09-12).
  */
-static bool dop_preroll = true;
+static bool dop_preroll;
 module_param(dop_preroll, bool, 0644);
 MODULE_PARM_DESC(dop_preroll,
-	"DSD stream start: 1 = DoP silence before the music (default), 0 = PCM zeros like the Windows driver.");
+	"DSD stream start: 1 = DoP silence before the music, 0 = PCM zeros like the Windows driver (default).");
 
 /* diagnostic: 0 keeps the DAC muted (GPIO 0 low) while streaming */
 static bool unmute = true;
