@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Linux driver for Mytek Digital Stereo192-DSD DAC USB2
  *
@@ -121,7 +122,7 @@ static int mytek_control_set_rate(struct control_runtime *rt, int rate)
 		return ret;
 	}
 
-	comm_rt->write8(comm_rt, 0x22, 0x00, 0x00);		/* Set Pin 0 to low state (mute) */
+	comm_rt->write8(comm_rt, 0x22, 0x00, 0x00);		/* Pin 0 low (vendor "mute") */
 	comm_rt->write16(comm_rt, 0x02, 0x00, 0x00, 0x00);	/* Disable streaming */
 
 	/* set soundcard clock */
@@ -147,8 +148,9 @@ static int mytek_control_set_rate(struct control_runtime *rt, int rate)
 /*
  * GPIO pin 0 and FPGA reg 6 bit 1 as the Windows driver drives them (USB
  * capture): both set some time after streaming started, both cleared
- * before streaming stops. Pin 0 low = output muted, so the DAC does not
- * play the relock on rate and PCM/DSD changes.
+ * before streaming stops. The vendor driver calls this mute; on the
+ * Stereo192-DSD neither has an audible effect (tested with pin 0 kept
+ * low: normal output), it is kept to match the vendor sequence.
  */
 static int mytek_control_set_mute(struct control_runtime *rt, bool mute)
 {

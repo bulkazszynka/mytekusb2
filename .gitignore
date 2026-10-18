@@ -57,3 +57,5 @@ Mkfile.old
 # End of https://www.toptal.com/developers/gitignore/api/c
 # Secure Boot signing keys (private!)
 cert/
+# editor settings
+.vscode/

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Linux driver for Mytek Digital Stereo192-DSD DAC USB2
  *

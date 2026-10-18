@@ -1,7 +1,7 @@
 #!/bin/bash
 # End-to-end test of snd-usb-mytek against an emulated DAC (tests/mytek-emu.c)
 # in a QEMU guest. Needs a kernel tree built with SND, USBIP_VHCI_HCD (and
-# preferably KASAN/PROVE_LOCKING), see documentation/testing.md.
+# preferably KASAN/PROVE_LOCKING), see tests/README.md.
 #   tests/run-qemu-test.sh <kernel-build-dir> <workdir>
 set -euo pipefail
 KB=$1; W=$2

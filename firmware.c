@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Linux driver for Mytek Digital Stereo192-DSD DAC USB2
  *
@@ -371,9 +372,9 @@ static int mytek_fw_check(struct usb_interface *intf, const u8 *version)
 		if (!memcmp(version, known_fw_versions + i, 4))
 			return 0;
 
-	dev_err(&intf->dev, "invalid fimware version in device: %*ph. "
-			"please reconnect to power. if this failure "
-			"still happens, check your firmware installation.",
+	dev_err(&intf->dev, "invalid firmware version in device: %*ph. "
+			"Please reconnect to power. If this failure "
+			"still happens, check your firmware installation.\n",
 			4, version);
 	return -EINVAL;
 }

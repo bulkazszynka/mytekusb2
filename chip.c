@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Linux driver for Mytek Digital Stereo192-DSD DAC USB2
  *
@@ -6,7 +7,9 @@
  * Based on 6fire usb driver
  *
  * Adapted for Mytek by	: Jurgen Kramer
- * Last updated		: Oct 15, 2026 (Linux 6.x/7.x port)
+ * Last updated		: Sep 17, 2015
+ * Linux 6.x/7.x port, DKMS, click fixes and native DSD (2026): see the
+ * git history
  * Copyright		: (C) Jurgen Kramer
  *
  * This program is free software; you can redistribute it and/or modify

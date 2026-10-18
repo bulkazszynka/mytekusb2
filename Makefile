@@ -24,7 +24,6 @@ debug:
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
-	rm -f version.h
 
 # Plain install for the running kernel only; prefer scripts/dkms-install.sh
 # which rebuilds the module automatically on every kernel update.

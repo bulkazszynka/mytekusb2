@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Linux driver for Mytek Digital Stereo192-DSD DAC USB2
  *
@@ -6,7 +7,9 @@
  * Based on 6fire usb driver
  *
  * Adapted for Mytek by	: Jurgen Kramer
- * Last updated		: Oct 18, 2026
+ * Last updated		: Mar 14, 2014
+ * Linux 6.x/7.x port, DKMS, click fixes and native DSD (2026): see the
+ * git history
  * Copyright		: (C) Jurgen Kramer
  *
  * This program is free software; you can redistribute it and/or modify
@@ -53,50 +56,51 @@ MODULE_PARM_DESC(zlp_fill,
 	"Frames sent for an IN packet without feedback: 0 = none, 1 = nominal for the sample rate (default), 2 = always 5 (driver 1.x).");
 
 /*
- * The device mutes its output (GPIO pin 0 low) while the stream is set up
- * and unmutes this long after streaming started, so the DAC's relock on a
- * rate or PCM/DSD change is not heard. prepare() waits for the unmute, so
- * no audio is lost. The Windows driver unmutes after about 500ms; on the
- * real DAC 300ms still let rate changes click, 700ms did not (step 08).
+ * Silent pre-roll: prepare() returns only this long after streaming
+ * started, so the DAC has relocked to a new rate before the music starts
+ * (no audio is lost). On the real DAC 300ms still let rate changes click,
+ * 700ms did not. At its end the driver sends the Windows driver's
+ * "unmute" (GPIO 0 high, FPGA reg 6 = 2, about 500ms after start there);
+ * on the Stereo192-DSD that sequence has no audible effect.
  */
 static unsigned int unmute_delay = 700;
 module_param(unmute_delay, uint, 0644);
 MODULE_PARM_DESC(unmute_delay,
-	"Milliseconds between stream start and unmuting the DAC (default 700, max 2000).");
+	"Milliseconds of silence after a stream starts before playback, lets the DAC relock (default 700, max 2000).");
 
 /*
- * Stream stop: the DAC is muted mute_delay ms before the stream stops.
- * DoP streams then send PCM silence for dop_exit ms (still muted) so the
+ * Stream stop: the Windows driver's "mute" is sent mute_delay ms before the
+ * stream stops. DoP streams then send PCM silence for dop_exit ms so the
  * DAC leaves DSD mode while its clock still runs: without it DSD64 clicked
- * at nearly every stop and the display stayed at "DSD" for later PCM
- * (host steps 09-12). DSD128 still clicks when the DoP data ends, however
- * long the silence - the DAC's own mode switch.
+ * at nearly every stop and the display stayed at "DSD" for later PCM.
+ * DSD128 still clicks when the DoP data ends, however long the silence -
+ * the DAC's own mode switch.
  */
 static unsigned int mute_delay = 20;
 module_param(mute_delay, uint, 0644);
 MODULE_PARM_DESC(mute_delay,
-	"Milliseconds between muting the DAC and stopping the stream (default 20, max 1000).");
+	"Milliseconds between the vendor mute sequence and stopping the stream (default 20, max 1000).");
 static unsigned int dop_exit = 200;
 module_param(dop_exit, uint, 0644);
 MODULE_PARM_DESC(dop_exit,
 	"Milliseconds of PCM silence after a DSD stream before it stops (default 200, max 5000).");
 
 /*
- * Idle frames of a DSD stream before the first playback data: DoP
- * silence, or PCM zeros as the Windows driver sends them (it starts DoP
- * with the music, so the DAC switches to DSD only then; DSD64 start
- * clicks: DoP silence 16/18, zeros 8/12 in host steps 09-12).
+ * Idle frames of a DSD stream before the first playback data: PCM zeros
+ * as the Windows driver sends them (it starts DoP with the music, so the
+ * DAC switches to DSD only then), or DoP silence. Listening tests counted
+ * fewer DSD64 start clicks with zeros (8 of 12 vs 16 of 18 starts).
  */
 static bool dop_preroll;
 module_param(dop_preroll, bool, 0644);
 MODULE_PARM_DESC(dop_preroll,
 	"DSD stream start: 1 = DoP silence before the music, 0 = PCM zeros like the Windows driver (default).");
 
-/* diagnostic: 0 keeps the DAC muted (GPIO 0 low) while streaming */
+/* diagnostic: 0 never sends the vendor unmute (GPIO 0 stays low) */
 static bool unmute = true;
 module_param(unmute, bool, 0644);
 MODULE_PARM_DESC(unmute,
-	"Diagnostic: 0 = never unmute the DAC (checks that GPIO 0 mutes it), default 1.");
+	"Diagnostic: 0 = never send the vendor unmute sequence (GPIO 0 stays low), default 1.");
 
 /*
  * Native DSD: the DAC takes DSD only as DoP (the Windows driver does the
